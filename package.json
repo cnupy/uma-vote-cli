@@ -12,6 +12,7 @@
     "commit": "nub src/commit.ts",
     "reveal": "nub src/reveal.ts",
     "results": "nub src/results.ts",
+    "uma": "nub src/uma.ts",
     "comments": "nub src/comments.ts",
     "verify-key": "nub src/verify-key.ts",
     "addon": "nub src/run-addon.ts"

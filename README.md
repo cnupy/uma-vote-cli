@@ -91,6 +91,20 @@ Addons are plain TypeScript (nub runs them directly) and can be private repos cl
 `addons/` — the core never needs to know where your answers come from. Set
 `ROUNDS_DIR=addons/<name>/rounds` to keep salt backups version-controlled in the addon repo.
 
+## Staking & rewards
+
+```
+nub run uma           # staking & rewards dashboard (stake/unstake/claim)
+```
+
+A full-screen dashboard with three blocks: **STAKING** (how much of your UMA is staked,
+plus any pending unstake and its cooldown countdown), **VOTES** (lifetime vote count and
+the current staking APR) and **REWARDS** (unclaimed UMA). Keys: `s` stake (chains the
+token approval first when needed), `u` unstake (request, or execute once the cooldown
+has elapsed), `c` claim (`w` to wallet, `s` claim & stake), `r` refresh, `q` quit.
+Every transaction shows resolved fees, a pending-tx warning and a simulation result
+before asking for confirmation — the hardware wallet is only touched when you send.
+
 ## Safety model
 
 - Commit hashes bind `price, salt, voter, time, ancillaryData, roundId, identifier`

@@ -272,7 +272,16 @@ export async function getEncryptedVoteEvents(
 // env vars. Values are still editable in Frame's approval window before signing.
 export const DEFAULT_TIP_GWEI = '0.0001'
 
-export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+export type FeeInfo = {
+    maxFeePerGas: bigint
+    maxPriorityFeePerGas: bigint
+    baseFee: bigint
+    maxFeeOverridden: boolean
+    tipOverridden: boolean
+}
+
+// Fee resolution without printing — TUI callers render it themselves
+export async function computeFees(): Promise<FeeInfo> {
     const maxFeeArg = argValue('max-fee') ?? process.env.MAX_FEE_GWEI
     const tipArg = argValue('tip') ?? process.env.PRIORITY_FEE_GWEI
 
@@ -281,10 +290,18 @@ export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriority
 
     const maxPriorityFeePerGas = parseGwei(tipArg ?? DEFAULT_TIP_GWEI)
     const maxFeePerGas = maxFeeArg ? parseGwei(maxFeeArg) : (baseFee * 120n) / 100n + maxPriorityFeePerGas
+    return { maxFeePerGas, maxPriorityFeePerGas, baseFee, maxFeeOverridden: !!maxFeeArg, tipOverridden: !!tipArg }
+}
 
-    console.log(`Fees: base ${formatGwei(baseFee)} gwei → max fee ${formatGwei(maxFeePerGas)} gwei ${maxFeeArg ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(maxPriorityFeePerGas)} gwei ${tipArg ? '(override)' : '(default)'}`)
-    if (maxFeePerGas < baseFee) console.log(`⚠️  max fee is below the current base fee — the tx will not be included until base fee drops.`)
-    return { maxFeePerGas, maxPriorityFeePerGas }
+export function describeFees(f: FeeInfo): string {
+    return `Fees: base ${formatGwei(f.baseFee)} gwei → max fee ${formatGwei(f.maxFeePerGas)} gwei ${f.maxFeeOverridden ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(f.maxPriorityFeePerGas)} gwei ${f.tipOverridden ? '(override)' : '(default)'}`
+}
+
+export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    const fees = await computeFees()
+    console.log(describeFees(fees))
+    if (fees.maxFeePerGas < fees.baseFee) console.log(`⚠️  max fee is below the current base fee — the tx will not be included until base fee drops.`)
+    return { maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas }
 }
 
 // ---------- batched sending ----------
