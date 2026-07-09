@@ -1,7 +1,9 @@
 // Live/past round results: per-request quorum, consensus, and price
 // distribution aggregated from VoteRevealed events, with your own vote marked
 // green (matches current majority), red (differs), or gray (committed but not
-// revealed / not committed). Used by `nub run results` and by status during
+// revealed / not committed). fetchRoundResults returns the structured data;
+// renderRoundResults prints the static table on top of it. Used by
+// `nub run results` (static + interactive explorer) and by status during
 // the reveal phase.
 import { parseAbiItem } from 'viem'
 import { readFileSync, existsSync } from 'node:fs'
@@ -45,13 +47,13 @@ async function findBlockByTimestamp(ts: bigint): Promise<bigint> {
     return block.number
 }
 
-const fmtTokens = (wei: bigint) => {
+export const fmtTokens = (wei: bigint) => {
     const t = Number(wei) / 1e18
     return t >= 1e6 ? `${(t / 1e6).toFixed(1)}M` : t >= 1e3 ? `${(t / 1e3).toFixed(0)}k` : t.toFixed(0)
 }
-const pct = (num: bigint, den: bigint) => den === 0n ? '—' : `${(Number(num * 10_000n / den) / 100).toFixed(1)}%`
+export const pct = (num: bigint, den: bigint) => den === 0n ? '—' : `${(Number(num * 10_000n / den) / 100).toFixed(1)}%`
 // Progress toward a threshold, capped at 100% once met
-const pctOfThreshold = (num: bigint, den: bigint) => den === 0n ? '—' : num >= den ? '100%' : `${(Number(num * 10_000n / den) / 100).toFixed(1)}%`
+export const pctOfThreshold = (num: bigint, den: bigint) => den === 0n ? '—' : num >= den ? '100%' : `${(Number(num * 10_000n / den) / 100).toFixed(1)}%`
 
 type RequestTally = {
     identifier: `0x${string}`
@@ -62,26 +64,48 @@ type RequestTally = {
     myPrice?: bigint
 }
 
-export async function renderRoundResults(roundId: number): Promise<void> {
+export type PriceSlice = { price: bigint; tokens: bigint }
+
+export type RequestResult = {
+    identifier: `0x${string}`
+    time: bigint
+    ancillaryData: `0x${string}`
+    question: string
+    prices: PriceSlice[]        // every distinct revealed price, sorted by tokens desc
+    total: bigint
+    leadingPrice: bigint
+    leadingTokens: bigint
+    quorumOk: boolean
+    consensusOk: boolean
+    myPrice?: bigint
+    myCommitted: boolean        // committed but not (yet) revealed
+}
+
+export type RoundResults = {
+    roundId: number
+    // no-votes = round was never frozen · not-started = reveal phase not reached
+    // yet · no-reveals = reveal phase open but nothing revealed so far
+    status: 'ok' | 'no-votes' | 'not-started' | 'no-reveals'
+    minParticipation: bigint
+    minAgreement: bigint
+    cumulativeStake: bigint
+    requests: RequestResult[]
+    fetchedAt: number
+}
+
+export async function fetchRoundResults(roundId: number): Promise<RoundResults> {
     const round = await publicClient.readContract({
         ...votingContract, functionName: 'rounds', args: [BigInt(roundId)],
     }) as readonly [string, bigint, bigint, bigint, number]
     const [, minParticipation, minAgreement, cumulativeStake] = round
-    if (minParticipation === 0n) {
-        console.log(`Round ${roundId}: no reveals recorded (round was never frozen — nothing was voted).`)
-        return
-    }
-
-    console.log(`Round ${roundId}: staked ${fmtTokens(cumulativeStake)} · quorum needs ${fmtTokens(minParticipation)} revealed · consensus needs ${fmtTokens(minAgreement)} on one outcome`)
+    const base = { roundId, minParticipation, minAgreement, cumulativeStake, requests: [] as RequestResult[] }
+    if (minParticipation === 0n) return { ...base, status: 'no-votes', fetchedAt: Date.now() }
 
     // Reveals happen only in the round's reveal phase — scan exactly that block range
     const revealStartTs = BigInt(roundId) * ROUND_SECONDS + PHASE_SECONDS
     const roundEndTs = BigInt(roundId + 1) * ROUND_SECONDS
     const latest = await publicClient.getBlock()
-    if (latest.timestamp < revealStartTs) {
-        console.log(`Reveal phase hasn't started yet.`)
-        return
-    }
+    if (latest.timestamp < revealStartTs) return { ...base, status: 'not-started', fetchedAt: Date.now() }
     const fromBlock = await findBlockByTimestamp(revealStartTs)
     const toBlock = latest.timestamp < roundEndTs ? latest.number : await findBlockByTimestamp(roundEndTs)
 
@@ -133,10 +157,7 @@ export async function renderRoundResults(roundId: number): Promise<void> {
         t.total += a.numTokens
         if (myAddress && (a.voter as string).toLowerCase() === myAddress) t.myPrice = a.price
     }
-    if (tallies.size === 0) {
-        console.log(`No reveals yet in round ${roundId}.`)
-        return
-    }
+    if (tallies.size === 0) return { ...base, status: 'no-reveals', fetchedAt: Date.now() }
 
     // My unrevealed commitments → gray "committed" marker
     const myCommits = await getOnChainCommitments(roundId).catch(() => undefined)
@@ -150,38 +171,71 @@ export async function renderRoundResults(roundId: number): Promise<void> {
         ?? titleFromAncillary(t.ancillaryData)
         ?? `${decodeIdentifier(t.identifier)} @ ${t.time}`
 
+    const requests = [...tallies.values()].map(t => {
+        const prices = [...t.byPrice.entries()]
+            .map(([p, tokens]) => ({ price: BigInt(p), tokens }))
+            .sort((a, b) => (b.tokens > a.tokens ? 1 : b.tokens < a.tokens ? -1 : 0))
+        const leading = prices[0]
+        return {
+            identifier: t.identifier, time: t.time, ancillaryData: t.ancillaryData,
+            question: questionFor(t),
+            prices, total: t.total,
+            leadingPrice: leading.price, leadingTokens: leading.tokens,
+            quorumOk: t.total >= minParticipation,
+            consensusOk: leading.tokens >= minAgreement,
+            myPrice: t.myPrice,
+            myCommitted: t.myPrice === undefined && (myCommits?.commitments.some(c =>
+                c.ancillaryData.toLowerCase() === t.ancillaryData.toLowerCase() && c.time === t.time) ?? false),
+        }
+    })
+    return { ...base, status: 'ok', requests, fetchedAt: Date.now() }
+}
+
+export async function renderRoundResults(roundId: number): Promise<void> {
+    const d = await fetchRoundResults(roundId)
+    if (d.status === 'no-votes') {
+        console.log(`Round ${roundId}: no reveals recorded (round was never frozen — nothing was voted).`)
+        return
+    }
+
+    console.log(`Round ${roundId}: staked ${fmtTokens(d.cumulativeStake)} · quorum needs ${fmtTokens(d.minParticipation)} revealed · consensus needs ${fmtTokens(d.minAgreement)} on one outcome`)
+    if (d.status === 'not-started') {
+        console.log(`Reveal phase hasn't started yet.`)
+        return
+    }
+    if (d.status === 'no-reveals') {
+        console.log(`No reveals yet in round ${roundId}.`)
+        return
+    }
+
     const P = { P1: 0n, P2: 1_000000000000000000n, P3: 500000000000000000n, P4: -57896044618658097711785492504343953926634992332820282019728792003956564819968n }
 
     console.log(`\n  #  Mine     Question                                  Quorum                Consensus             P1      P2      P3      P4      other`)
     console.log(`  ${'-'.repeat(138)}`)
     let row = 0, passing = 0
-    for (const t of tallies.values()) {
+    for (const t of d.requests) {
         row++
-        const leading = [...t.byPrice.entries()].sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0))[0]
-        const leadingPrice = BigInt(leading[0]), leadingTokens = leading[1]
-        const quorumOk = t.total >= minParticipation
-        const consensusOk = leadingTokens >= minAgreement
-        if (quorumOk && consensusOk) passing++
+        if (t.quorumOk && t.consensusOk) passing++
 
         let mine = `${DIM}${'–'.padEnd(7)}${RESET}`
         if (t.myPrice !== undefined) {
-            mine = t.myPrice === leadingPrice
+            mine = t.myPrice === t.leadingPrice
                 ? `${GREEN}${('✓' + priceLabel(t.myPrice)).padEnd(7)}${RESET}`
                 : `${RED}${('✗' + priceLabel(t.myPrice)).padEnd(7)}${RESET}`
-        } else if (myCommits?.commitments.some(c =>
-            c.ancillaryData.toLowerCase() === t.ancillaryData.toLowerCase() && c.time === t.time)) {
+        } else if (t.myCommitted) {
             mine = `${DIM}${'cmtd'.padEnd(7)}${RESET}` // committed, not (yet) revealed
         }
 
-        const pctOf = (price: bigint) => pct(t.byPrice.get(price.toString()) ?? 0n, t.total).padStart(6)
-        const known = (t.byPrice.get(P.P1.toString()) ?? 0n) + (t.byPrice.get(P.P2.toString()) ?? 0n) + (t.byPrice.get(P.P3.toString()) ?? 0n) + (t.byPrice.get(P.P4.toString()) ?? 0n)
+        const tokensFor = (price: bigint) => t.prices.find(s => s.price === price)?.tokens ?? 0n
+        const pctOf = (price: bigint) => pct(tokensFor(price), t.total).padStart(6)
+        const known = tokensFor(P.P1) + tokensFor(P.P2) + tokensFor(P.P3) + tokensFor(P.P4)
         const other = pct(t.total - known, t.total).padStart(6)
 
-        const quorum = `${pctOfThreshold(t.total, minParticipation).padStart(6)} ${fmtTokens(t.total)}/${fmtTokens(minParticipation)}${quorumOk ? '✓' : '✗'}`
-        const consensus = `${pctOfThreshold(leadingTokens, minAgreement).padStart(6)} ${fmtTokens(leadingTokens)}/${fmtTokens(minAgreement)}${consensusOk ? '✓' : '✗'}`
-        console.log(`  ${String(row).padStart(2)}  ${mine} ${questionFor(t).slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}`)
+        const quorum = `${pctOfThreshold(t.total, d.minParticipation).padStart(6)} ${fmtTokens(t.total)}/${fmtTokens(d.minParticipation)}${t.quorumOk ? '✓' : '✗'}`
+        const consensus = `${pctOfThreshold(t.leadingTokens, d.minAgreement).padStart(6)} ${fmtTokens(t.leadingTokens)}/${fmtTokens(d.minAgreement)}${t.consensusOk ? '✓' : '✗'}`
+        console.log(`  ${String(row).padStart(2)}  ${mine} ${t.question.slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}`)
     }
-    console.log(`\n${passing}/${tallies.size} request(s) currently pass quorum + consensus.`)
+    console.log(`\n${passing}/${d.requests.length} request(s) currently pass quorum + consensus.`)
     console.log(`${DIM}Quorum/Consensus: progress toward the threshold (revealed/required · leading-outcome/required), capped at 100%.${RESET}`)
     console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · – = no vote${RESET}`)
 }

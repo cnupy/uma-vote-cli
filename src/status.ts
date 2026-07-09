@@ -3,7 +3,7 @@ import {
     phaseEndsAt, fmtCountdown,
 } from './common'
 import { renderRoundResults } from './round-results'
-import { getOnChainCommitments, renderAnswersDiff, GREEN, RESET } from './compare'
+import { getOnChainCommitments, renderAnswersDiff, GREEN, DIM, RESET } from './compare'
 
 const [phase, roundId, pending] = await Promise.all([getVotePhase(), getCurrentRoundId(), getPendingRequests()])
 const active = pending.filter(r => r.lastVotingRound === roundId)
@@ -45,4 +45,5 @@ if (phase === 0 && answers) {
 if (phase === 1) {
     console.log('')
     await renderRoundResults(roundId).catch(e => console.log(`⚠️  Couldn't load round results: ${(e as Error).message.split('\n')[0]}`))
+    console.log(`${DIM}run \`nub run results\` to explore${RESET}`)
 }
