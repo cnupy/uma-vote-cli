@@ -9,8 +9,10 @@ import React, { useState, useEffect, useRef } from 'react'
 import { render, Box, Text, useInput, useApp } from 'ink'
 import { formatUnits } from 'viem'
 import { getCurrentRoundId, getVotePhase, phaseEndsAt, fmtCountdown, P1_VALUE, P2_VALUE, P3_VALUE, P4_VALUE } from './common'
+import { EXPECTED_VOTER } from './config'
 import { priceLabel } from './compare'
 import { fetchRoundResults, fmtTokens, pct, pctOfThreshold, type RoundResults, type RequestResult } from './round-results'
+import { fetchVoteSlashes, slashFor, roundSlashStats, fmtSlash, type VoteSlashes } from './slashes'
 import { resolveAncillaryText, titleFromText, mapLimit } from './resolve'
 
 const WINDOW = 12
@@ -54,6 +56,8 @@ function App({ opts }: { opts: ExplorerOpts }) {
     const cache = useRef(new Map<number, RoundResults>())
     const roundRef = useRef(round)
     const seq = useRef(0)
+    const slashes = useRef<VoteSlashes | undefined>()
+    const slashesTried = useRef(false)
 
     // Live only for the current round in its reveal phase — past rounds are final
     const live = round === opts.currentRound && opts.phase === 1
@@ -95,6 +99,19 @@ function App({ opts }: { opts: ExplorerOpts }) {
         return () => clearInterval(iv)
     }, [])
 
+    // Per-vote slash amounts (final rounds only) — one subgraph fetch per
+    // explorer session; every round then matches against the map as it renders.
+    // Needs a voter address: EXPECTED_VOTER, else the cached signing key.
+    useEffect(() => {
+        if (slashesTried.current || !data) return
+        const voter = EXPECTED_VOTER?.toLowerCase() ?? data.myAddress
+        if (!voter) return
+        slashesTried.current = true
+        fetchVoteSlashes(voter).then(m => {
+            if (m) { slashes.current = m; tick(x => x + 1) }
+        })
+    }, [data])
+
     // Placeholder questions (hash-only cross-chain requests with no answers
     // file) resolve to real titles in the background; disk-cached, so revisits
     // and cached rounds fill in instantly
@@ -114,6 +131,10 @@ function App({ opts }: { opts: ExplorerOpts }) {
     const cur = rows.length === 0 ? 0 : Math.min(cursor, rows.length - 1)
     const topSafe = Math.min(top, Math.max(0, rows.length - WINDOW))
     const row = rows[cur]
+
+    // Slash amounts only make sense once a round is over (nothing settles live)
+    const showSlash = round < opts.currentRound && slashes.current !== undefined
+    const slashStats = showSlash ? roundSlashStats(slashes.current!, rows) : undefined
 
     const cursorUp = () => setCursor(c => { const nc = Math.max(0, c - 1); if (nc < top) setTop(nc); return nc })
     const cursorDown = () => setCursor(c => { const nc = Math.min(Math.max(0, rows.length - 1), c + 1); if (nc >= top + WINDOW) setTop(nc - WINDOW + 1); return nc })
@@ -150,7 +171,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
     const passing = rows.filter(t => t.quorumOk && t.consensusOk).length
     const header = (
         <Box flexDirection="column">
-            <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{live ? (paused ? <Text color="yellow"> · paused</Text> : ' · live (60s)') : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
+            <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{slashStats && slashStats.matched > 0 ? <> · your net: <Text color={slashStats.net < 0 ? 'red' : 'green'}>{(slashStats.net > 0 ? '+' : '') + slashStats.net.toFixed(3)} UMA</Text>{slashStats.pending > 0 ? <Text dimColor> · {slashStats.pending} pending</Text> : null}</> : null}{live ? (paused ? <Text color="yellow"> · paused</Text> : ' · live (60s)') : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
             {data && !data.myAddress && <Text color="yellow"> ⚠ your votes can't be marked — no .signing-key.json (run `nub run verify-key` once)</Text>}
         </Box>
     )
@@ -167,6 +188,13 @@ function App({ opts }: { opts: ExplorerOpts }) {
                     : row.myCommitted ? <Text color="gray">committed, not (yet) revealed</Text>
                     : data.myAddress ? <Text dimColor>none</Text>
                     : <Text color="yellow">unknown — no .signing-key.json (run `nub run verify-key` once)</Text>}</Text>
+                {showSlash && (() => {
+                    const s = slashFor(slashes.current!, row.identifier, row.time, row.ancillaryData)
+                    return <Text>slash:      {!s
+                        ? <Text dimColor>none — you had nothing at stake for this request</Text>
+                        : s.pending ? <Text color="gray">pending — your slashing trackers haven't settled this request yet</Text>
+                        : <Text color={Number(s.slashAmount) < 0 ? 'red' : 'green'}>{fmtSlash(s.slashAmount)} UMA {Number(s.slashAmount) < 0 ? 'lost' : 'earned'} through slashing</Text>}</Text>
+                })()}
                 <Text>quorum:     {pctOfThreshold(row.total, data.minParticipation)} — {fmtTokens(row.total)}/{fmtTokens(data.minParticipation)} revealed/required {row.quorumOk ? <Text color="green">✓</Text> : <Text color="red">✗</Text>}</Text>
                 <Text>consensus:  {pctOfThreshold(row.leadingTokens, data.minAgreement)} — {fmtTokens(row.leadingTokens)}/{fmtTokens(data.minAgreement)} leading/required {row.consensusOk ? <Text color="green">✓</Text> : <Text color="red">✗</Text>}</Text>
                 <Text> </Text>
@@ -194,7 +222,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
             {data?.status === 'not-started' && <Text dimColor> Reveal phase hasn't started yet.</Text>}
             {data?.status === 'no-reveals' && <Text dimColor> No reveals yet in round {round}.</Text>}
             {rows.length > 0 && <>
-                <Text dimColor>    Mine     {'Question'.padEnd(QUESTION_WIDTH + 1)} {'Quorum'.padEnd(8)}{'Consens'.padEnd(9)}Leading</Text>
+                <Text dimColor>    Mine     {'Question'.padEnd(QUESTION_WIDTH + 1)} {'Quorum'.padEnd(8)}{'Consens'.padEnd(9)}{showSlash ? 'Leading'.padEnd(13) + 'Slash'.padStart(10) : 'Leading'}</Text>
                 <Text dimColor> {topSafe > 0 ? `▲ ${topSafe} more` : '─'.repeat(10)}</Text>
                 {slice.map((t, i) => {
                     const idx = topSafe + i
@@ -207,7 +235,13 @@ function App({ opts }: { opts: ExplorerOpts }) {
                             <Text>{t.question.slice(0, QUESTION_WIDTH).padEnd(QUESTION_WIDTH + 1)}</Text>
                             <Text color={t.quorumOk ? 'green' : 'red'}> {(pctOfThreshold(t.total, data!.minParticipation) + (t.quorumOk ? '✓' : '✗')).padStart(7)}</Text>
                             <Text color={t.consensusOk ? 'green' : 'red'} > {(pctOfThreshold(t.leadingTokens, data!.minAgreement) + (t.consensusOk ? '✓' : '✗')).padStart(7)} </Text>
-                            <Text color={priceColor(t.leadingPrice)} bold> {fullPriceLabel(t.leadingPrice).slice(0, 12)}</Text>
+                            <Text color={priceColor(t.leadingPrice)} bold> {showSlash ? fullPriceLabel(t.leadingPrice).slice(0, 12).padEnd(12) : fullPriceLabel(t.leadingPrice).slice(0, 12)}</Text>
+                            {showSlash && (() => {
+                                const s = slashFor(slashes.current!, t.identifier, t.time, t.ancillaryData)
+                                return !s ? <Text>{' '.repeat(10)}</Text>
+                                    : s.pending ? <Text color="gray">{'pending'.padStart(10)}</Text>
+                                    : <Text color={Number(s.slashAmount) < 0 ? 'red' : 'green'}>{fmtSlash(s.slashAmount).padStart(10)}</Text>
+                            })()}
                         </Text>
                     )
                 })}

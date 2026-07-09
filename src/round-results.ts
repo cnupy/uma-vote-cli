@@ -8,9 +8,18 @@
 import { parseAbiItem } from 'viem'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
-import { ROOT } from './config'
+import { ROOT, EXPECTED_VOTER } from './config'
 import { publicClient, votingContract, decodeIdentifier, getAnswers, titleFromAncillary, type Answer } from './common'
 import { getOnChainCommitments, priceLabel, GREEN, RED, DIM, RESET } from './compare'
+import { fetchVoteSlashes, slashFor, roundSlashStats, fmtSlash, type VoteSlashes, type VoteSlash } from './slashes'
+
+// ~10-char slash column cell: signed amount (green/red), dim "pending" for
+// entries the voter's slashing trackers haven't settled (NEVER shown as 0),
+// blank when the voter had nothing at stake
+export const renderSlashCell = (s: VoteSlash | undefined): string =>
+    !s ? ` ${' '.repeat(10)}`
+        : s.pending ? ` ${DIM}${'pending'.padStart(10)}${RESET}`
+        : ` ${Number(s.slashAmount) < 0 ? RED : GREEN}${fmtSlash(s.slashAmount).padStart(10)}${RESET}`
 
 const voteRevealedEvent = parseAbiItem(
     'event VoteRevealed(address indexed voter, address indexed caller, uint32 roundId, bytes32 indexed identifier, uint256 time, bytes ancillaryData, int256 price, uint128 numTokens)'
@@ -245,8 +254,14 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
 
     const P = { P1: 0n, P2: 1_000000000000000000n, P3: 500000000000000000n, P4: -57896044618658097711785492504343953926634992332820282019728792003956564819968n }
 
-    console.log(`\n  #  Mine     Question                                  Quorum                Consensus             P1      P2      P3      P4      other`)
-    console.log(`  ${'-'.repeat(138)}`)
+    // Per-vote UMA earned/lost via slashing — final rounds only, and only when
+    // a voter address is known and the subgraph answered (else no column at all)
+    let slashes: VoteSlashes | undefined
+    const slashVoter = EXPECTED_VOTER?.toLowerCase() ?? d.myAddress
+    if (isFinal(roundId) && slashVoter) slashes = await fetchVoteSlashes(slashVoter)
+
+    console.log(`\n  #  Mine     Question                                  Quorum                Consensus             P1      P2      P3      P4      other${slashes ? '      Slash' : ''}`)
+    console.log(`  ${'-'.repeat(slashes ? 149 : 138)}`)
     let row = 0, passing = 0
     for (const t of d.requests) {
         row++
@@ -268,9 +283,19 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
 
         const quorum = `${pctOfThreshold(t.total, d.minParticipation).padStart(6)} ${fmtTokens(t.total)}/${fmtTokens(d.minParticipation)}${t.quorumOk ? '✓' : '✗'}`
         const consensus = `${pctOfThreshold(t.leadingTokens, d.minAgreement).padStart(6)} ${fmtTokens(t.leadingTokens)}/${fmtTokens(d.minAgreement)}${t.consensusOk ? '✓' : '✗'}`
-        console.log(`  ${String(row).padStart(2)}  ${mine} ${t.question.slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}`)
+
+        const slashCell = slashes ? renderSlashCell(slashFor(slashes, t.identifier, t.time, t.ancillaryData)) : ''
+        console.log(`  ${String(row).padStart(2)}  ${mine} ${t.question.slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}${slashCell}`)
     }
     console.log(`\n${passing}/${d.requests.length} request(s) currently pass quorum + consensus.`)
+    if (slashes) {
+        const { net, pending, matched } = roundSlashStats(slashes, d.requests)
+        if (matched > 0) {
+            const netStr = `${net > 0 ? '+' : ''}${net.toFixed(3)}`
+            console.log(`Your net for round ${roundId}: ${net < 0 ? RED : GREEN}${netStr} UMA${RESET}${pending > 0 ? `${DIM} · ${pending} pending${RESET}` : ''}`)
+        }
+        console.log(`${DIM}Slash: UMA earned/lost through slashing (UMA subgraph) · pending = your slashing trackers haven't settled it yet.${RESET}`)
+    }
     console.log(`${DIM}Quorum/Consensus: progress toward the threshold (revealed/required · leading-outcome/required), capped at 100%.${RESET}`)
     console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · – = no vote${RESET}`)
     if (!d.myAddress) console.log(`⚠️  Your votes can't be marked — no .signing-key.json (run \`nub run verify-key\` once).`)
