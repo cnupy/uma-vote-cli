@@ -109,8 +109,10 @@ function App({ opts }: { opts: ExplorerOpts }) {
         if (view === 'detail') {
             if (key.escape || input === 'd' || input === 'q') setView('list')
             else if (input === 'r') load(round, true)
-            else if (prevKey) cursorUp()   // prev/next REQUEST, staying in detail
-            else if (nextKey) cursorDown()
+            else if (prevKey) gotoRound(round - 1)          // rounds: same keys as the list
+            else if (nextKey) gotoRound(round + 1)
+            else if (key.leftArrow) cursorUp()              // plain ←/→: prev/next request
+            else if (key.rightArrow) cursorDown()
             return
         }
         // list view — [ ]/ctrl+←→ navigate ROUNDS here
@@ -155,7 +157,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
                     <Text key={s.price.toString()}>  <Text color={priceColor(s.price)} bold>{fullPriceLabel(s.price).slice(0, 20).padEnd(21)}</Text>{fmtTokens(s.tokens).padStart(8)}  {pct(s.tokens, row.total).padStart(6)}{i === 0 ? <Text dimColor>  ◀ leading</Text> : null}</Text>
                 ))}
                 <Text> </Text>
-                <Text dimColor>ctrl+←→ / [ ] prev/next request · r refetch · esc/d/q back</Text>
+                <Text dimColor>←→ prev/next request · ctrl+←→ / [ ] prev/next round · r refetch · esc/d/q back</Text>
             </Box>
         )
     }
