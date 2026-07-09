@@ -125,6 +125,12 @@ export async function getAnswers(roundId: number): Promise<{ source: string; ans
     if (existsSync(local)) {
         return { source: `answers/${roundId}.json (local)`, answers: JSON.parse(readFileSync(local, 'utf8')) }
     }
+    // Answers saved by an interactive commit review. Kept in a separate file so
+    // a pulled answers file is never overwritten and, once pulled, wins again.
+    const localInteractive = path.join(ROOT, 'answers', `${roundId}.local.json`)
+    if (existsSync(localInteractive)) {
+        return { source: `answers/${roundId}.local.json (your last interactive review)`, answers: JSON.parse(readFileSync(localInteractive, 'utf8')) }
+    }
     // Dynamic import: addons import this module, so the host loads lazily
     const { loadAddons } = await import('./addons')
     for (const addon of await loadAddons()) {

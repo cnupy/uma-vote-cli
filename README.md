@@ -58,9 +58,11 @@ skip gates), `--yes` (skip confirmation); values as `--flag value` or `--flag=va
 `commit` needs an answer (P1–P4 or a custom price) per request. Precedence:
 
 1. `ANSWERS_FILE=<path>` — a JSON array of `{ancillaryData, timestamp, question, answer}`
-2. `answers/<roundId>.json` — same schema, saved locally
-3. an installed **addon** (below) — asked to resolve, then to pull from upstream
-4. none of the above — the interactive review opens with every request unanswered,
+2. `answers/<roundId>.json` — same schema, saved locally (e.g. pulled by an addon)
+3. `answers/<roundId>.local.json` — your last interactive review, saved automatically on
+   confirm; kept separate so a pulled file is never overwritten (and, once pulled, wins)
+4. an installed **addon** (below) — asked to resolve, then to pull from upstream
+5. none of the above — the interactive review opens with every request unanswered,
    so you can vote from scratch like on the dApp (batch runs abort instead)
 
 ### Addons

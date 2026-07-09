@@ -1,7 +1,8 @@
 import path from 'node:path'
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { encodeFunctionData, getAddress } from 'viem'
 import { umaContractAbi } from './umaAbi'
-import { EXPECTED_VOTER, ANSWERS_FILE } from './config'
+import { EXPECTED_VOTER, ANSWERS_FILE, ROOT } from './config'
 import { getSigningKey, deterministicSalt, encryptVote, type SigningKey } from './crypto'
 import { ask } from './signers/prompt'
 import { loadAddons } from './addons'
@@ -190,13 +191,22 @@ if (interactive) {
     }
     toSend = []
     let unanswered = 0
+    const answered: Answer[] = []
     for (const r of reviewed) {
         const price = r.answer ? encodePrice(r.answer, r.identifierDecoded) : undefined
         if (price === undefined) { unanswered++; continue }
+        answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer })
         // Committing a subset is safe: VotingV2.commitVote overwrites the hash
         // per request, other requests' commitments are untouched.
         if (onchain && !force && r.onchainPrice === price) continue
         toSend.push(toPlannedVote(r, price))
+    }
+    // Persist the review so a re-run prefills instead of starting blank. Saved
+    // BEFORE sending (a rejected tx must not lose the review) and to a separate
+    // .local.json — a pulled answers file is never overwritten and keeps precedence.
+    if (answered.length > 0) {
+        mkdirSync(path.join(ROOT, 'answers'), { recursive: true })
+        writeFileSync(path.join(ROOT, 'answers', `${roundId}.local.json`), JSON.stringify(answered, null, 2))
     }
     if (unanswered > 0) console.log(`⚠ ${unanswered} unanswered request(s) skipped — no commit for them.`)
     if (onchain && unclaimed.length > 0) {
