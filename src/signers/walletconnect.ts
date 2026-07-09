@@ -3,6 +3,7 @@ import { createWalletClient, custom, getAddress } from 'viem'
 import { toAccount } from 'viem/accounts'
 import { mainnet } from 'viem/chains'
 import { ROOT, RPC_URLS } from '../config'
+import { note } from './prompt'
 import type { Wallet } from './types'
 
 // Any WalletConnect v2 wallet: MetaMask/Rabby (incl. their Trezor/Ledger
@@ -25,9 +26,10 @@ export async function connect(): Promise<Wallet> {
         storageOptions: { database: path.join(ROOT, '.walletconnect.db') },
     })
     provider.on('display_uri', (uri: string) => {
-        console.log('\nPair a wallet: scan the QR, or paste the URI into its WalletConnect dialog.\n')
-        qrcode.generate(uri, { small: true })
-        console.log(`${uri}\n`)
+        // note() so an ink app (init wizard) renders the QR instead of a mid-frame print
+        note('\nPair a wallet: scan the QR, or paste the URI into its WalletConnect dialog.\n')
+        qrcode.generate(uri, { small: true }, qr => note(qr))
+        note(`${uri}\n`)
     })
 
     const accounts = await provider.enable()

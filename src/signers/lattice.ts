@@ -5,7 +5,7 @@ import { createWalletClient, fallback, getAddress, hashMessage, http, keccak256,
 import { toAccount } from 'viem/accounts'
 import { mainnet } from 'viem/chains'
 import { ROOT, RPC_URLS } from '../config'
-import { ask } from './prompt'
+import { ask, note } from './prompt'
 import type { Wallet } from './types'
 
 // Pairing state (deterministic client key + session) — keep private; whoever
@@ -51,7 +51,8 @@ export async function connect(): Promise<Wallet> {
         setStoredClient: async (clientData: string | null) => { store.clientData = clientData ?? undefined; save() },
     }))
     if (!isPaired) {
-        console.log('Not paired yet — the Lattice should now show a pairing code.')
+        // note() so an ink app (init wizard) renders this instead of a mid-frame print
+        note('Not paired yet — the Lattice should now show a pairing code.')
         const code = await ask('Pairing code from the Lattice screen')
         if (!(await gp.pair(code.toUpperCase()))) throw new Error('Lattice pairing failed — wrong or expired code.')
     }

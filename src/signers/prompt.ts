@@ -22,9 +22,33 @@ function start(): void {
     rl.on('close', () => { for (const waiter of waiters.splice(0)) waiter('') })
 }
 
+// While an ink app is registered here, prompts render through it instead of
+// readline (which would fight ink for stdin and tear frames). With no bridge,
+// ask()/note() behavior is byte-identical to the plain readline/console path.
+export type PromptBridge = {
+    ask(question: string): Promise<string>
+    note?(text: string): void
+}
+let bridge: PromptBridge | undefined
+
+export function setPromptBridge(b: PromptBridge | undefined): void {
+    bridge = b
+}
+
 export async function ask(question: string, fallback?: string): Promise<string> {
+    if (bridge) {
+        const line = await bridge.ask(fallback ? `${question} [${fallback}]` : question)
+        return line.trim() || fallback || ''
+    }
     start()
     process.stdout.write(fallback ? `${question} [${fallback}]: ` : `${question}: `)
     const line = lines.shift() ?? await new Promise<string>(resolve => waiters.push(resolve))
     return line.trim() || fallback || ''
+}
+
+// Mid-flow prints (pairing hints, the WalletConnect QR) — rendered by the ink
+// app while a bridge is registered, console.log otherwise.
+export function note(text: string): void {
+    if (bridge?.note) bridge.note(text)
+    else console.log(text)
 }
