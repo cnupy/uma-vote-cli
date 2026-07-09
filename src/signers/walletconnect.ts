@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { rmSync } from 'node:fs'
 import { createWalletClient, custom, getAddress } from 'viem'
 import { toAccount } from 'viem/accounts'
 import { mainnet } from 'viem/chains'
@@ -17,13 +18,21 @@ export async function connect(): Promise<Wallet> {
         import('@walletconnect/ethereum-provider'),
         import('qrcode-terminal'),
     ])
+    // A session the wallet has dropped still sits in .walletconnect.db, so
+    // enable() silently reuses the corpse and no QR ever shows. --reconnect
+    // wipes the stored session for a guaranteed fresh pairing.
+    const db = path.join(ROOT, '.walletconnect.db')
+    if (process.argv.includes('--reconnect')) {
+        note('--reconnect: discarding the stored WalletConnect session — a new pairing QR follows.')
+        rmSync(db, { recursive: true, force: true })
+    }
     const provider = await EthereumProvider.init({
         projectId,
         chains: [mainnet.id],
         rpcMap: { [mainnet.id]: RPC_URLS[0] },
         showQrModal: false,
         metadata: { name: 'uma-vote-cli', description: 'UMA VotingV2 CLI', url: 'https://github.com/cnupy/uma-vote-cli', icons: [] },
-        storageOptions: { database: path.join(ROOT, '.walletconnect.db') },
+        storageOptions: { database: db },
     })
     provider.on('display_uri', (uri: string) => {
         // note() so an ink app (init wizard) renders the QR instead of a mid-frame print
@@ -31,6 +40,12 @@ export async function connect(): Promise<Wallet> {
         qrcode.generate(uri, { small: true }, qr => note(qr))
         note(`${uri}\n`)
     })
+
+    // Expired sessions re-pair automatically (fresh QR) instead of failing on use
+    if (provider.session && provider.session.expiry * 1000 < Date.now()) {
+        note('WalletConnect session expired — pairing again.')
+        await provider.disconnect().catch(() => { /* relay unreachable — enable() below starts fresh anyway */ })
+    }
 
     const accounts = await provider.enable()
     if (accounts.length === 0) throw new Error('WalletConnect session has no account.')

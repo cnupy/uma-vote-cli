@@ -76,6 +76,8 @@ tool and vote.uma.xyz are interchangeable mid-round.
 - `--force` — re-send everything / retry a reveal
 - `--yes` — skip the commit confirmation
 - `--max-fee=<gwei>` / `--tip=<gwei>` — fee overrides (defaults: base + 20% + tip)
+- `--reconnect` — WalletConnect: discard the stored session and show a fresh pairing QR
+  (expired sessions re-pair automatically; this is for wallet-side disconnects)
 - `.env` reference: [.env.example](.env.example) — RPC fallback list, answers sources, signer settings
 
 Keep `.signing-key.json`, `.lattice-client.json` and `.walletconnect.db` private;

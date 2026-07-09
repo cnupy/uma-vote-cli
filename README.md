@@ -55,7 +55,9 @@ to the list; `d`/`s`/`c` switch views directly. Unanswered requests are skipped 
 a warning. `--yes` (or piping) keeps the non-interactive table flow.
 
 Flags: `--dry-run` (print multicall calldata instead of sending), `--force` (re-send all /
-skip gates), `--yes` (skip confirmation); values as `--flag value` or `--flag=value`.
+skip gates), `--yes` (skip confirmation), `--reconnect` (WalletConnect: discard the stored
+session and pair afresh — use when the wallet dropped the session and no QR appears);
+values as `--flag value` or `--flag=value`.
 
 ### Where answers come from
 
