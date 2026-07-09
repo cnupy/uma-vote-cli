@@ -224,8 +224,8 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
     return { ...base, status: 'ok', requests, fetchedAt: Date.now() }
 }
 
-export async function renderRoundResults(roundId: number): Promise<void> {
-    const d = await fetchRoundResults(roundId)
+export async function renderRoundResults(roundId: number, pre?: RoundResults): Promise<void> {
+    const d = pre ?? await fetchRoundResults(roundId)
     if (d.status === 'no-votes') {
         console.log(`Round ${roundId}: no reveals recorded (round was never frozen — nothing was voted).`)
         return

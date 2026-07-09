@@ -2,7 +2,7 @@ import {
     getVotePhase, getCurrentRoundId, getPendingRequests, getAnswers, loadRound,
     phaseEndsAt, fmtCountdown,
 } from './common'
-import { renderRoundResults } from './round-results'
+import { fetchRoundResults, renderRoundResults } from './round-results'
 import { getOnChainCommitments, renderAnswersDiff, GREEN, DIM, RESET } from './compare'
 
 const [phase, roundId, pending] = await Promise.all([getVotePhase(), getCurrentRoundId(), getPendingRequests()])
@@ -16,10 +16,21 @@ console.log(`Requests: ${active.length} votable this round (${pending.length} pe
 console.log(`Answers:  ${answers ? `${answers.answers.length} entries from ${answers.source}` : active.length > 0 ? 'not published yet' : 'n/a'}`)
 console.log(`Local:    ${round ? `rounds/${roundId}.json — committed: ${round.commitTxHash ?? 'no'}, revealed: ${round.revealTxHash ?? 'no'}` : 'no round file'}`)
 
+// Reveal-phase verdicts come from the CHAIN, not the local round file — reveal
+// is chain-first, so a missing/unreachable round file must not read as "nothing
+// to reveal" when on-chain commitments exist. (Fetched once, reused for the table.)
+const results = phase === 1 ? await fetchRoundResults(roundId).catch(() => undefined) : undefined
+const mine = results?.status === 'ok' ? results.requests : []
+const myRevealed = mine.filter(r => r.myPrice !== undefined).length
+const myUnrevealed = mine.filter(r => r.myCommitted).length
+
 if (active.length > 0) {
     if (phase === 0 && !round?.commitTxHash) console.log(`\n→ Action: nub run commit ${answers ? '' : '(once answers are published)'}`)
+    else if (phase === 1 && myUnrevealed > 0) console.log(`\n→ Action: nub run reveal — ${myUnrevealed} on-chain commitment(s) not revealed yet${myRevealed > 0 ? ` (${myRevealed} already revealed)` : ''}.`)
+    else if (phase === 1 && myRevealed > 0) console.log(`\n${GREEN}→ Revealed ${myRevealed} vote(s) this round — nothing to do.${RESET}`)
+    else if (phase === 1 && results?.myAddress) console.log(`\n→ No on-chain commitments this round — nothing to reveal.`)
     else if (phase === 1 && round?.commitTxHash && !round.revealTxHash) console.log(`\n→ Action: nub run reveal`)
-    else if (phase === 1 && !round?.commitTxHash) console.log(`\n→ No commit recorded this round — nothing to reveal.`)
+    else if (phase === 1) console.log(`\n→ Can't check your commitments on-chain (no .signing-key.json) and no local round file — if you committed, run nub run reveal.`)
     else console.log(`\n→ Nothing to do.`)
 }
 
@@ -44,6 +55,6 @@ if (phase === 0 && answers) {
 // Live tally during the reveal phase (same view as `nub run results`)
 if (phase === 1) {
     console.log('')
-    await renderRoundResults(roundId).catch(e => console.log(`⚠️  Couldn't load round results: ${(e as Error).message.split('\n')[0]}`))
+    await renderRoundResults(roundId, results).catch(e => console.log(`⚠️  Couldn't load round results: ${(e as Error).message.split('\n')[0]}`))
     console.log(`${DIM}run \`nub run results\` to explore${RESET}`)
 }
