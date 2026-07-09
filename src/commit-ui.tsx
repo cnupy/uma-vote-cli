@@ -4,7 +4,7 @@
 // then confirm. The caller re-encodes prices from the returned answers and sends
 // only what differs from the on-chain commitments.
 import React, { useState, useEffect } from 'react'
-import { render, Box, Text, useInput, useApp } from 'ink'
+import { render, Box, Text, useInput } from 'ink'
 import { encodePrice, fmtCountdown } from './common'
 import { priceLabel } from './compare'
 import { fetchDiscordThread, flattenThread, type ThreadMessage } from './discord'
@@ -22,7 +22,7 @@ export type ReviewRow = {
     onchainPrice?: bigint       // your current on-chain commitment, if any
 }
 
-type ReviewOpts = {
+export type ReviewOpts = {
     roundId: number
     phaseEnd: Date
     rows: ReviewRow[]
@@ -59,8 +59,10 @@ const ancillaryText = (ancillaryData: `0x${string}`): string | undefined => {
     return printable.length > text.length * 0.9 ? printable : undefined
 }
 
-function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | null) => void }) {
-    const { exit } = useApp()
+// Embeddable review: calls onDone(rows) on confirm / onDone(null) on quit
+// instead of tearing down the Ink root, so a shell app can mount it inside its
+// own render.
+export function CommitReview({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | null) => void }) {
     const [rows] = useState(() => opts.rows.map(r => ({ ...r })))
     const [cursor, setCursor] = useState(0)
     const [top, setTop] = useState(0)
@@ -196,7 +198,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
             return
         }
         if (view === 'confirm') {
-            if (input === 'y') { onDone(rows); exit() }
+            if (input === 'y') onDone(rows)
             else if (key.escape || input === 'n' || input === 'q') setView('list')
             return
         }
@@ -206,7 +208,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
         else if (answerKey(input)) { /* answered in place */ }
         else if (switchView(input)) { /* subview opened */ }
         else if (key.return) setView('confirm')
-        else if (input === 'q' || key.escape) { onDone(null); exit() }
+        else if (input === 'q' || key.escape) onDone(null)
     })
 
     // one-line planned/on-chain status so answering from docs/comments is visibly confirmed
@@ -346,7 +348,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
 // Resolves to the reviewed rows (answers possibly edited), or null if the user quit.
 export async function reviewVotes(opts: ReviewOpts): Promise<ReviewRow[] | null> {
     let result: ReviewRow[] | null = null
-    const app = render(<App opts={opts} onDone={r => { result = r }} />, { exitOnCtrlC: true })
+    const app = render(<CommitReview opts={opts} onDone={r => { result = r; app.unmount() }} />, { exitOnCtrlC: true })
     await app.waitUntilExit()
     return result
 }

@@ -5,7 +5,7 @@
 // (pairing codes, device-retry loops, the WalletConnect QR) renders inline
 // instead of tearing frames with raw stdout writes.
 import React, { useEffect, useRef, useState } from 'react'
-import { render, Box, Text, useInput, useApp } from 'ink'
+import { render, Box, Text, useInput } from 'ink'
 import { setPromptBridge } from './signers/prompt'
 import type { SignerKind } from './signers'
 
@@ -28,8 +28,11 @@ type Prompt = { question: string; resolve: (line: string) => void }
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-function App({ deps, onDone }: { deps: WizardDeps; onDone: (outcome: WizardOutcome) => void }) {
-    const { exit } = useApp()
+// Embeddable wizard: calls onDone(outcome) when finished instead of tearing
+// down the Ink root, so a shell app can mount it inside its own render. While
+// mounted it owns the prompt bridge (registered on mount, unregistered on
+// unmount).
+export function InitWizard({ deps, onDone }: { deps: WizardDeps; onDone: (outcome: WizardOutcome) => void }) {
     const [step, setStep] = useState<Step>('pick')
     const [cursor, setCursor] = useState(() => Math.max(0, deps.kinds.indexOf(deps.current as SignerKind)))
     const [kind, setKind] = useState<SignerKind>(deps.kinds[0])
@@ -112,23 +115,23 @@ function App({ deps, onDone }: { deps: WizardDeps; onDone: (outcome: WizardOutco
             if (key.upArrow) setCursor(c => Math.max(0, c - 1))
             else if (key.downArrow) setCursor(c => Math.min(deps.kinds.length - 1, c + 1))
             else if (key.return) start(deps.kinds[cursor])
-            else if (input === 'q' || key.escape) { onDone('aborted'); exit() }
+            else if (input === 'q' || key.escape) onDone('aborted')
             return
         }
         if (step === 'error') {
             if (input === 'r') void test(kind)
             else if (input === 'p') { setNotes([]); setStep('pick') }
-            else if (input === 'q' || key.escape) { onDone('failed'); exit() }
+            else if (input === 'q' || key.escape) onDone('failed')
             return
         }
         if (step === 'confirm') {
             if (key.return || input === 'y') {
                 try { deps.writeEnv(updatesRef.current); setStep('done') } catch (e) { fail(e) }
             }
-            else if (input === 'q' || input === 'n' || key.escape) { onDone('aborted'); exit() }
+            else if (input === 'q' || input === 'n' || key.escape) onDone('aborted')
             return
         }
-        if (step === 'done') { onDone('saved'); exit() }
+        if (step === 'done') onDone('saved')
     })
 
     const promptLine = prompt && (
@@ -208,7 +211,7 @@ function App({ deps, onDone }: { deps: WizardDeps; onDone: (outcome: WizardOutco
 // readline prompts in the same process are unaffected.
 export async function runInitWizard(deps: WizardDeps): Promise<WizardOutcome> {
     let outcome: WizardOutcome = 'aborted'
-    const app = render(<App deps={deps} onDone={o => { outcome = o }} />, { exitOnCtrlC: true })
+    const app = render(<InitWizard deps={deps} onDone={o => { outcome = o; app.unmount() }} />, { exitOnCtrlC: true })
     try {
         await app.waitUntilExit()
     } finally {

@@ -6,7 +6,7 @@
 // reveal phase — auto-refresh every 60s. Piped/non-TTY runs keep the static
 // table in round-results.ts.
 import React, { useState, useEffect, useRef } from 'react'
-import { render, Box, Text, useInput, useApp } from 'ink'
+import { render, Box, Text, useInput } from 'ink'
 import { formatUnits } from 'viem'
 import { getCurrentRoundId, getVotePhase, phaseEndsAt, fmtCountdown, P1_VALUE, P2_VALUE, P3_VALUE, P4_VALUE } from './common'
 import { priceLabel } from './compare'
@@ -34,14 +34,15 @@ const mineMarker = (t: RequestResult): { label: string; color?: string; dim?: bo
     return { label: '–', dim: true }
 }
 
-type ExplorerOpts = {
+export type ExplorerOpts = {
     startRound: number
     currentRound: number
     phase: number               // 0 = commit, 1 = reveal (at launch)
 }
 
-function App({ opts }: { opts: ExplorerOpts }) {
-    const { exit } = useApp()
+// Embeddable explorer: calls onExit() when the user quits (q/esc) instead of
+// tearing down the Ink root, so a shell app can mount it inside its own render.
+export function ResultsExplorer({ opts, onExit }: { opts: ExplorerOpts; onExit: () => void }) {
     const [round, setRound] = useState(opts.startRound)
     const [data, setData] = useState<RoundResults | undefined>()
     const [fetching, setFetching] = useState<number | undefined>()
@@ -133,7 +134,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
             return
         }
         // list view — [ ]/ctrl+←→ navigate ROUNDS here
-        if (input === 'q' || key.escape) exit()
+        if (input === 'q' || key.escape) onExit()
         else if (input === 'r') load(round, true)
         else if (input === 'p' && live) setPaused(p => !p)
         else if (prevKey) gotoRound(round - 1)
@@ -224,7 +225,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
 export async function runResultsExplorer(startRound: number): Promise<void> {
     const [currentRound, phase] = await Promise.all([getCurrentRoundId(), getVotePhase()])
     const app = render(
-        <App opts={{ startRound: Math.min(startRound, currentRound), currentRound, phase }} />,
+        <ResultsExplorer opts={{ startRound: Math.min(startRound, currentRound), currentRound, phase }} onExit={() => app.unmount()} />,
         { exitOnCtrlC: true },
     )
     await app.waitUntilExit()
