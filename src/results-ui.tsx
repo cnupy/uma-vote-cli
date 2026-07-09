@@ -129,7 +129,10 @@ function App({ opts }: { opts: ExplorerOpts }) {
         : 'past round (final)'
     const passing = rows.filter(t => t.quorumOk && t.consensusOk).length
     const header = (
-        <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{live ? ' · live (60s)' : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
+        <Box flexDirection="column">
+            <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{live ? ' · live (60s)' : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
+            {data && !data.myAddress && <Text color="yellow"> ⚠ your votes can't be marked — no .signing-key.json (run `nub run verify-key` once)</Text>}
+        </Box>
     )
 
     if (view === 'detail' && row && data) {
@@ -141,7 +144,9 @@ function App({ opts }: { opts: ExplorerOpts }) {
                 <Text> </Text>
                 <Text>my vote:    {row.myPrice !== undefined
                     ? <Text color={m.color}>{fullPriceLabel(row.myPrice)} {row.myPrice === row.leadingPrice ? '✓ matches current majority' : '✗ differs from current majority'}</Text>
-                    : row.myCommitted ? <Text color="gray">committed, not (yet) revealed</Text> : <Text dimColor>none</Text>}</Text>
+                    : row.myCommitted ? <Text color="gray">committed, not (yet) revealed</Text>
+                    : data.myAddress ? <Text dimColor>none</Text>
+                    : <Text color="yellow">unknown — no .signing-key.json (run `nub run verify-key` once)</Text>}</Text>
                 <Text>quorum:     {pctOfThreshold(row.total, data.minParticipation)} — {fmtTokens(row.total)}/{fmtTokens(data.minParticipation)} revealed/required {row.quorumOk ? <Text color="green">✓</Text> : <Text color="red">✗</Text>}</Text>
                 <Text>consensus:  {pctOfThreshold(row.leadingTokens, data.minAgreement)} — {fmtTokens(row.leadingTokens)}/{fmtTokens(data.minAgreement)} leading/required {row.consensusOk ? <Text color="green">✓</Text> : <Text color="red">✗</Text>}</Text>
                 <Text> </Text>

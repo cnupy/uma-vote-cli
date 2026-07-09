@@ -90,6 +90,9 @@ export type RoundResults = {
     minAgreement: bigint
     cumulativeStake: bigint
     requests: RequestResult[]
+    // Address my-vote markers are matched against; undefined = no cached signing
+    // key, so votes CANNOT be marked (callers must surface this, not show "none")
+    myAddress?: string
     fetchedAt: number
 }
 
@@ -98,7 +101,16 @@ export async function fetchRoundResults(roundId: number): Promise<RoundResults> 
         ...votingContract, functionName: 'rounds', args: [BigInt(roundId)],
     }) as readonly [string, bigint, bigint, bigint, number]
     const [, minParticipation, minAgreement, cumulativeStake] = round
-    const base = { roundId, minParticipation, minAgreement, cumulativeStake, requests: [] as RequestResult[] }
+
+    // My address (for marking my votes) — cached signing key, no wallet needed
+    let myAddress: string | undefined
+    const keyCache = path.join(ROOT, '.signing-key.json')
+    if (existsSync(keyCache)) {
+        const cache = JSON.parse(readFileSync(keyCache, 'utf8')) as Record<string, { address: string }>
+        myAddress = Object.values(cache)[0]?.address.toLowerCase()
+    }
+
+    const base = { roundId, minParticipation, minAgreement, cumulativeStake, requests: [] as RequestResult[], myAddress }
     if (minParticipation === 0n) return { ...base, status: 'no-votes', fetchedAt: Date.now() }
 
     // Reveals happen only in the round's reveal phase — scan exactly that block range
@@ -132,14 +144,6 @@ export async function fetchRoundResults(roundId: number): Promise<RoundResults> 
     const logs = []
     for (let from = fromBlock; from <= toBlock; from += CHUNK) {
         logs.push(...await getLogsRange(from, from + CHUNK - 1n > toBlock ? toBlock : from + CHUNK - 1n))
-    }
-
-    // My address (for marking my votes) — cached signing key, no wallet needed
-    let myAddress: string | undefined
-    const keyCache = path.join(ROOT, '.signing-key.json')
-    if (existsSync(keyCache)) {
-        const cache = JSON.parse(readFileSync(keyCache, 'utf8')) as Record<string, { address: string }>
-        myAddress = Object.values(cache)[0]?.address.toLowerCase()
     }
 
     const tallies = new Map<string, RequestTally>()
@@ -238,4 +242,5 @@ export async function renderRoundResults(roundId: number): Promise<void> {
     console.log(`\n${passing}/${d.requests.length} request(s) currently pass quorum + consensus.`)
     console.log(`${DIM}Quorum/Consensus: progress toward the threshold (revealed/required · leading-outcome/required), capped at 100%.${RESET}`)
     console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · – = no vote${RESET}`)
+    if (!d.myAddress) console.log(`⚠️  Your votes can't be marked — no .signing-key.json (run \`nub run verify-key\` once).`)
 }
