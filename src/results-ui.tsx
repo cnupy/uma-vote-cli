@@ -48,6 +48,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
     const [cursor, setCursor] = useState(0)
     const [top, setTop] = useState(0)
     const [view, setView] = useState<'list' | 'detail'>('list')
+    const [paused, setPaused] = useState(false)
     const [, tick] = useState(0)
     const cache = useRef(new Map<number, RoundResults>())
     const roundRef = useRef(round)
@@ -61,7 +62,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
         const id = ++seq.current
         setFetching(r)
         setError(undefined)
-        fetchRoundResults(r).then(d => {
+        fetchRoundResults(r, bypassCache).then(d => {
             cache.current.set(r, d)
             if (seq.current !== id) return // superseded by a newer fetch
             setFetching(undefined)
@@ -82,10 +83,10 @@ function App({ opts }: { opts: ExplorerOpts }) {
     }, [round])
 
     useEffect(() => {
-        if (!live) return
+        if (!live || paused) return
         const iv = setInterval(() => load(round, true), 60_000)
         return () => clearInterval(iv)
-    }, [round, live])
+    }, [round, live, paused])
 
     // 1s re-render so "refreshed Ns ago" ticks
     useEffect(() => {
@@ -109,6 +110,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
         if (view === 'detail') {
             if (key.escape || input === 'd' || input === 'q') setView('list')
             else if (input === 'r') load(round, true)
+            else if (input === 'p' && live) setPaused(p => !p)
             else if (prevKey) gotoRound(round - 1)          // rounds: same keys as the list
             else if (nextKey) gotoRound(round + 1)
             else if (key.leftArrow) cursorUp()              // plain ←/→: prev/next request
@@ -118,6 +120,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
         // list view — [ ]/ctrl+←→ navigate ROUNDS here
         if (input === 'q' || key.escape) exit()
         else if (input === 'r') load(round, true)
+        else if (input === 'p' && live) setPaused(p => !p)
         else if (prevKey) gotoRound(round - 1)
         else if (nextKey) gotoRound(round + 1)
         else if (key.upArrow) cursorUp()
@@ -132,7 +135,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
     const passing = rows.filter(t => t.quorumOk && t.consensusOk).length
     const header = (
         <Box flexDirection="column">
-            <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{live ? ' · live (60s)' : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
+            <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{live ? (paused ? <Text color="yellow"> · paused</Text> : ' · live (60s)') : ''}{freshness ? <Text dimColor>  {freshness}{fetching === round && data ? ' · refreshing…' : ''}</Text> : null}</Text>
             {data && !data.myAddress && <Text color="yellow"> ⚠ your votes can't be marked — no .signing-key.json (run `nub run verify-key` once)</Text>}
         </Box>
     )
@@ -157,7 +160,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
                     <Text key={s.price.toString()}>  <Text color={priceColor(s.price)} bold>{fullPriceLabel(s.price).slice(0, 20).padEnd(21)}</Text>{fmtTokens(s.tokens).padStart(8)}  {pct(s.tokens, row.total).padStart(6)}{i === 0 ? <Text dimColor>  ◀ leading</Text> : null}</Text>
                 ))}
                 <Text> </Text>
-                <Text dimColor>←→ prev/next request · ctrl+←→ / [ ] prev/next round · r refetch · esc/d/q back</Text>
+                <Text dimColor>←→ prev/next request · ctrl+←→ / [ ] prev/next round · r refetch{live ? ` · p ${paused ? 'resume' : 'pause'}` : ''} · esc/d/q back</Text>
             </Box>
         )
     }
@@ -197,7 +200,7 @@ function App({ opts }: { opts: ExplorerOpts }) {
             </>}
             <Text> </Text>
             <Text dimColor> Mine: <Text color="green">✓ matches majority</Text> · <Text color="red">✗ differs</Text> · <Text color="gray">cmtd committed, not revealed</Text> · – no vote</Text>
-            <Text dimColor> ↑↓ move · d/enter details · ctrl+←→ / [ ] prev/next round · r refetch · q quit</Text>
+            <Text dimColor> ↑↓ move · d/enter details · ctrl+←→ / [ ] prev/next round · r refetch{live ? ` · p ${paused ? 'resume' : 'pause'}` : ''} · q quit</Text>
         </Box>
     )
 }

@@ -6,7 +6,7 @@
 // `nub run results` (static + interactive explorer) and by status during
 // the reveal phase.
 import { parseAbiItem } from 'viem'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { ROOT } from './config'
 import { publicClient, votingContract, decodeIdentifier, getAnswers, titleFromAncillary, type Answer } from './common'
@@ -96,20 +96,49 @@ export type RoundResults = {
     fetchedAt: number
 }
 
-export async function fetchRoundResults(roundId: number): Promise<RoundResults> {
+// ---------- disk cache ----------
+// Past rounds are final, so their results persist in .cache/results/ across
+// runs (getLogs sweeps take seconds). Entries invalidate when the signing key
+// changes (my-vote markers are baked into the data) or the schema bumps.
+const CACHE_VERSION = 1
+const cachePath = (roundId: number) => path.join(ROOT, '.cache', 'results', `${roundId}.json`)
+const jsonReplacer = (_k: string, v: unknown) => typeof v === 'bigint' ? { $bigint: v.toString() } : v
+const jsonReviver = (_k: string, v: unknown) =>
+    v && typeof v === 'object' && '$bigint' in (v as object) ? BigInt((v as { $bigint: string }).$bigint) : v
+const isFinal = (roundId: number) => roundId < Math.floor(Date.now() / 1000 / Number(ROUND_SECONDS))
+
+export async function fetchRoundResults(roundId: number, fresh = false): Promise<RoundResults> {
+    if (!fresh && isFinal(roundId) && existsSync(cachePath(roundId))) {
+        try {
+            const c = JSON.parse(readFileSync(cachePath(roundId), 'utf8'), jsonReviver) as { version: number; data: RoundResults }
+            if (c.version === CACHE_VERSION && c.data.myAddress === currentMyAddress()) return c.data
+        } catch { /* unreadable cache entry — refetch below overwrites it */ }
+    }
+    const data = await fetchRoundResultsUncached(roundId)
+    if (isFinal(roundId)) {
+        try {
+            mkdirSync(path.dirname(cachePath(roundId)), { recursive: true })
+            writeFileSync(cachePath(roundId), JSON.stringify({ version: CACHE_VERSION, data }, jsonReplacer))
+        } catch { /* cache write is best-effort */ }
+    }
+    return data
+}
+
+const currentMyAddress = (): string | undefined => {
+    const keyCache = path.join(ROOT, '.signing-key.json')
+    if (!existsSync(keyCache)) return undefined
+    const cache = JSON.parse(readFileSync(keyCache, 'utf8')) as Record<string, { address: string }>
+    return Object.values(cache)[0]?.address.toLowerCase()
+}
+
+async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults> {
     const round = await publicClient.readContract({
         ...votingContract, functionName: 'rounds', args: [BigInt(roundId)],
     }) as readonly [string, bigint, bigint, bigint, number]
     const [, minParticipation, minAgreement, cumulativeStake] = round
 
     // My address (for marking my votes) — cached signing key, no wallet needed
-    let myAddress: string | undefined
-    const keyCache = path.join(ROOT, '.signing-key.json')
-    if (existsSync(keyCache)) {
-        const cache = JSON.parse(readFileSync(keyCache, 'utf8')) as Record<string, { address: string }>
-        myAddress = Object.values(cache)[0]?.address.toLowerCase()
-    }
-
+    const myAddress = currentMyAddress()
     const base = { roundId, minParticipation, minAgreement, cumulativeStake, requests: [] as RequestResult[], myAddress }
     if (minParticipation === 0n) return { ...base, status: 'no-votes', fetchedAt: Date.now() }
 

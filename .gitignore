@@ -6,6 +6,7 @@ node_modules/
 answers/
 rounds/
 logs/
+.cache/
 addons*/
 *.prototype.ts
 *.prototype.tsx
