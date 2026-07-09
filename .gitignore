@@ -1,0 +1,11 @@
+node_modules/
+.env
+.signing-key.json*
+.lattice-client.json
+.walletconnect.db
+answers/
+rounds/
+logs/
+addons*/
+*.prototype.ts
+*.prototype.tsx

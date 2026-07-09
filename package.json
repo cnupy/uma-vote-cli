@@ -1,0 +1,34 @@
+{
+  "name": "uma-vote-cli",
+  "version": "0.1.0",
+  "description": "General-purpose CLI for UMA VotingV2: commit/reveal voting with hardware wallets, live round results, Discord discussion threads, and pluggable answer-source addons",
+  "license": "MIT",
+  "repository": "github:cnupy/uma-vote-cli",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "init": "nub src/init.ts",
+    "status": "nub src/status.ts",
+    "commit": "nub src/commit.ts",
+    "reveal": "nub src/reveal.ts",
+    "results": "nub src/results.ts",
+    "comments": "nub src/comments.ts",
+    "verify-key": "nub src/verify-key.ts",
+    "addon": "nub src/run-addon.ts"
+  },
+  "dependencies": {
+    "@ledgerhq/hw-app-eth": "^7.8.8",
+    "@ledgerhq/hw-transport-node-hid": "^6.33.5",
+    "@trezor/connect": "^9.7.3",
+    "@walletconnect/ethereum-provider": "^2.23.10",
+    "eth-crypto": "^4.1.0",
+    "gridplus-sdk": "^4.0.0",
+    "ink": "^7.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "react": "^19.2.7",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17"
+  }
+}
