@@ -65,6 +65,8 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
     const [view, setView] = useState<'list' | 'details' | 'docs' | 'comments' | 'custom' | 'confirm'>('list')
     const [commentIdx, setCommentIdx] = useState(0)
     const [customBuf, setCustomBuf] = useState('')
+    // where the custom-price input was opened from, so enter/esc return there
+    const [customFrom, setCustomFrom] = useState<'list' | 'details' | 'docs' | 'comments'>('list')
     // threads keyed by row index: undefined = not fetched, null = loading
     const [threads, setThreads] = useState<Record<number, ReturnType<typeof flattenThread> | null>>({})
     const [, force] = useState(0)
@@ -82,14 +84,59 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
     const sendCount = rows.filter(willSend).length
     const unansweredRows = rows.filter(unanswered)
 
+    const fetchThread = (i: number) => {
+        if (threads[i] !== undefined) return
+        setThreads(t => ({ ...t, [i]: null }))
+        const r = rows[i]
+        fetchDiscordThread(r.time.toString(), r.identifierDecoded, r.question)
+            .then(th => setThreads(t => ({ ...t, [i]: flattenThread(th) })))
+    }
     const openComments = () => {
         setCommentIdx(0)
         setView('comments')
-        const i = cursor
-        if (threads[i] !== undefined) return
-        setThreads(t => ({ ...t, [i]: null }))
-        fetchDiscordThread(row.time.toString(), row.identifierDecoded, row.question)
-            .then(th => setThreads(t => ({ ...t, [i]: flattenThread(th) })))
+        fetchThread(cursor)
+    }
+    // clamped cursor move that keeps the list's scroll window showing it
+    const moveCursor = (delta: number) => {
+        const nc = Math.max(0, Math.min(rows.length - 1, cursor + delta))
+        setCursor(nc)
+        if (nc < top) setTop(nc)
+        else if (nc >= top + WINDOW) setTop(nc - WINDOW + 1)
+        return nc
+    }
+    // ctrl+←/→ ([ / ] fallback): prev/next question, staying in the current view
+    const navQuestion = (input: string, key: { ctrl: boolean; leftArrow: boolean; rightArrow: boolean }) => {
+        const delta = (key.ctrl && key.leftArrow) || input === '[' ? -1
+            : (key.ctrl && key.rightArrow) || input === ']' ? 1 : 0
+        if (delta === 0) return false
+        const nc = moveCursor(delta)
+        if (view === 'comments') { setCommentIdx(0); fetchThread(nc) }
+        return true
+    }
+    // 1-4 / v answer keys, identical in the list and every subview
+    const answerKey = (input: string) => {
+        if (/^[1-4]$/.test(input)) {
+            if (row.identifierDecoded === 'YES_OR_NO_QUERY') row.answer = `P${input}`
+            else if (input === '1') row.answer = 'no'
+            else if (input === '2') row.answer = 'yes'
+            else return false
+            force(x => x + 1)
+            return true
+        }
+        if (input === 'v') {
+            setCustomBuf(/^-?\d+(\.\d+)?$/.test(row.answer) ? row.answer : '')
+            setCustomFrom(view === 'details' || view === 'docs' || view === 'comments' ? view : 'list')
+            setView('custom')
+            return true
+        }
+        return false
+    }
+    // d/s/c open that subview for the same question; the current subview's key toggles back
+    const switchView = (input: string) => {
+        if (input === 'd') { setView(view === 'details' ? 'list' : 'details'); return true }
+        if (input === 's') { setView(view === 'docs' ? 'list' : 'docs'); return true }
+        if (input === 'c') { if (view === 'comments') setView('list'); else openComments(); return true }
+        return false
     }
 
     useInput((input, key) => {
@@ -97,23 +144,24 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
             if (key.return) {
                 if (customBuf === '' || /^-?\d+(\.\d+)?$/.test(customBuf)) {
                     row.answer = customBuf
-                    setView('list'); force(x => x + 1)
+                    setView(customFrom); force(x => x + 1)
                 }
             }
-            else if (key.escape) setView('list')
+            else if (key.escape) setView(customFrom)
             else if (key.backspace || key.delete) setCustomBuf(s => s.slice(0, -1))
             else if (/^[\d.-]$/.test(input)) setCustomBuf(s => s + input)
             return
         }
-        if (view === 'comments') {
-            const n = threads[cursor]?.length ?? 0
-            if (key.leftArrow && n > 0) setCommentIdx(i => (i - 1 + n) % n)
-            else if (key.rightArrow && n > 0) setCommentIdx(i => (i + 1) % n)
-            else if (key.escape || input === 'c' || input === 'q') setView('list')
-            return
-        }
-        if (view === 'details' || view === 'docs') {
-            if (key.escape || input === 'q' || input === 'd' || input === 's') setView('list')
+        if (view === 'details' || view === 'docs' || view === 'comments') {
+            if (navQuestion(input, key)) return
+            if (answerKey(input)) return
+            if (switchView(input)) return
+            if (view === 'comments') {
+                const n = threads[cursor]?.length ?? 0
+                if (key.leftArrow && n > 0) { setCommentIdx(i => (i - 1 + n) % n); return }
+                if (key.rightArrow && n > 0) { setCommentIdx(i => (i + 1) % n); return }
+            }
+            if (key.escape || input === 'q') setView('list')
             return
         }
         if (view === 'confirm') {
@@ -121,23 +169,21 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
             else if (key.escape || input === 'n' || input === 'q') setView('list')
             return
         }
-        // list view
-        if (key.upArrow) setCursor(c => { const nc = Math.max(0, c - 1); if (nc < top) setTop(nc); return nc })
-        else if (key.downArrow) setCursor(c => { const nc = Math.min(rows.length - 1, c + 1); if (nc >= top + WINDOW) setTop(nc - WINDOW + 1); return nc })
-        else if (/^[1-4]$/.test(input)) {
-            if (row.identifierDecoded === 'YES_OR_NO_QUERY') row.answer = `P${input}`
-            else if (input === '1') row.answer = 'no'
-            else if (input === '2') row.answer = 'yes'
-            else return
-            force(x => x + 1)
-        }
-        else if (input === 'v') { setCustomBuf(/^-?\d+(\.\d+)?$/.test(row.answer) ? row.answer : ''); setView('custom') }
-        else if (input === 'd') setView('details')
-        else if (input === 's') setView('docs')
-        else if (input === 'c') openComments()
+        // list view — ctrl+←/→ and [ ] alias ↑/↓
+        if (key.upArrow || (key.ctrl && key.leftArrow) || input === '[') moveCursor(-1)
+        else if (key.downArrow || (key.ctrl && key.rightArrow) || input === ']') moveCursor(1)
+        else if (answerKey(input)) { /* answered in place */ }
+        else if (switchView(input)) { /* subview opened */ }
         else if (key.return) setView('confirm')
         else if (input === 'q' || key.escape) { onDone(null); exit() }
     })
+
+    // one-line planned/on-chain status so answering from docs/comments is visibly confirmed
+    const statusLine = (
+        <Text>planned: <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED'}</Text> · on-chain: {row.onchainPrice !== undefined
+            ? <Text color={answerColor(priceLabel(row.onchainPrice))}>{priceLabel(row.onchainPrice)}</Text>
+            : <Text dimColor>not committed</Text>}</Text>
+    )
 
     if (view === 'details') {
         const p = priceOf(row)
@@ -154,7 +200,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
                     : <Text dimColor>{opts.diffAvailable ? 'not committed' : 'unknown (diff unavailable)'}</Text>}</Text>
                 <Text>planned:     <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED — will be skipped'}</Text>{p !== undefined ? <Text dimColor>  (price {p.toString()})</Text> : null}</Text>
                 <Text> </Text>
-                <Text dimColor>esc/d back</Text>
+                <Text dimColor>ctrl+←/→ or [ ] prev/next · 1-4 v answer · s docs · c comments · esc/d back</Text>
             </Box>
         )
     }
@@ -163,12 +209,13 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
+                {statusLine}
                 <Text> </Text>
                 {text
                     ? <Text wrap="wrap">{text.length > 1600 ? text.slice(0, 1600) + ' […]' : text}</Text>
                     : <Text dimColor wrap="wrap">Ancillary data carries no readable text (cross-chain request — only a hash is posted on mainnet). Full request docs live on the origin chain; see the dApp or the Discord thread (c).</Text>}
                 <Text> </Text>
-                <Text dimColor>esc/s back</Text>
+                <Text dimColor>ctrl+←/→ or [ ] prev/next · 1-4 v answer · d details · c comments · esc/s back</Text>
             </Box>
         )
     }
@@ -178,6 +225,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
+                {statusLine}
                 {thread === null && <Text dimColor>fetching Discord thread…</Text>}
                 {thread && thread.length === 0 && <Text dimColor>No comments (or thread not cached — current round only).</Text>}
                 {c && <>
@@ -187,7 +235,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
                     <Text wrap="wrap">{'  '.repeat(c.depth)}{c.message}</Text>
                 </>}
                 <Text> </Text>
-                <Text dimColor>←/→ navigate · esc/c back</Text>
+                <Text dimColor>←/→ comments · ctrl+←/→ or [ ] question · 1-4 v answer · d details · s docs · esc/c back</Text>
             </Box>
         )
     }
@@ -246,7 +294,7 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
             <Text dimColor> {top + WINDOW < rows.length ? `▼ ${rows.length - top - WINDOW} more` : '─'.repeat(10)}</Text>
             <Text> </Text>
             <Legend />
-            <Text dimColor> ↑↓ move · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d details · s docs · c comments · enter review+commit · q quit</Text>
+            <Text dimColor> ↑↓ or [ ] move · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d details · s docs · c comments · enter review+commit · q quit</Text>
         </Box>
     )
 }
