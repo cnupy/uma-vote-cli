@@ -11,6 +11,7 @@ import { formatUnits } from 'viem'
 import { getCurrentRoundId, getVotePhase, phaseEndsAt, fmtCountdown, P1_VALUE, P2_VALUE, P3_VALUE, P4_VALUE } from './common'
 import { priceLabel } from './compare'
 import { fetchRoundResults, fmtTokens, pct, pctOfThreshold, type RoundResults, type RequestResult } from './round-results'
+import { resolveAncillaryText, titleFromText, mapLimit } from './resolve'
 
 const WINDOW = 12
 const QUESTION_WIDTH = 48
@@ -93,6 +94,20 @@ function App({ opts }: { opts: ExplorerOpts }) {
         const iv = setInterval(() => tick(x => x + 1), 1000)
         return () => clearInterval(iv)
     }, [])
+
+    // Placeholder questions (hash-only cross-chain requests with no answers
+    // file) resolve to real titles in the background; disk-cached, so revisits
+    // and cached rounds fill in instantly
+    useEffect(() => {
+        if (!data || data.status !== 'ok') return
+        let alive = true
+        mapLimit(data.requests.filter(r => r.needsTitle), 5, async r => {
+            const text = await resolveAncillaryText(r.identifier, r.time, r.ancillaryData)
+            const title = text && titleFromText(text)
+            if (title && alive) { r.question = title; r.needsTitle = false; tick(x => x + 1) }
+        })
+        return () => { alive = false }
+    }, [data])
 
     const rows = data?.status === 'ok' ? data.requests : []
     // Clamped: a live refetch can shrink the list under the cursor

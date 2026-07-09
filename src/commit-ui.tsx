@@ -3,14 +3,16 @@
 // each request's details, its decoded ancillary text and its Discord discussion,
 // then confirm. The caller re-encodes prices from the returned answers and sends
 // only what differs from the on-chain commitments.
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { render, Box, Text, useInput, useApp } from 'ink'
 import { encodePrice, fmtCountdown } from './common'
 import { priceLabel } from './compare'
 import { fetchDiscordThread, flattenThread, type ThreadMessage } from './discord'
+import { resolveAncillaryText, titleFromText, descriptionFromText, fetchAiSummary, mapLimit, type OutcomeSummary } from './resolve'
 
 export type ReviewRow = {
     question: string
+    needsTitle?: boolean        // placeholder question — real title resolved lazily via the dApp
     identifier: `0x${string}`
     identifierDecoded: string
     time: bigint
@@ -69,7 +71,36 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
     const [customFrom, setCustomFrom] = useState<'list' | 'details' | 'docs' | 'comments'>('list')
     // threads keyed by row index: undefined = not fetched, null = loading
     const [threads, setThreads] = useState<Record<number, ReturnType<typeof flattenThread> | null>>({})
+    // docs view data per row: question text + AI summary (null = summary loading)
+    const [docs, setDocs] = useState<Record<number, { text?: string; textDone?: boolean; summary?: OutcomeSummary[] | null }>>({})
     const [, force] = useState(0)
+
+    // Placeholder questions (hash-only cross-chain requests with no answers file)
+    // resolve to real titles in the background via the dApp; cached on disk
+    useEffect(() => {
+        let alive = true
+        mapLimit(rows.filter(r => r.needsTitle), 5, async r => {
+            const text = await resolveAncillaryText(r.identifier, r.time, r.ancillaryData)
+            const title = text && titleFromText(text)
+            if (title && alive) { r.question = title; r.needsTitle = false; force(x => x + 1) }
+        })
+        return () => { alive = false }
+    }, [])
+
+    // Lazy-load the docs view's content (resolved description + AI summary)
+    useEffect(() => {
+        if (view !== 'docs') return
+        const i = cursor, r = rows[i]
+        if (!docs[i]?.textDone) {
+            resolveAncillaryText(r.identifier, r.time, r.ancillaryData)
+                .then(t => setDocs(d => ({ ...d, [i]: { ...d[i], text: t, textDone: true } })))
+        }
+        if (docs[i]?.summary === undefined) {
+            setDocs(d => ({ ...d, [i]: { ...d[i], summary: null } }))
+            fetchAiSummary(r.time, r.identifierDecoded, r.question)
+                .then(s => setDocs(d => ({ ...d, [i]: { ...d[i], summary: s ?? [] } })))
+        }
+    }, [view, cursor])
 
     const row = rows[cursor]
     const priceOf = (r: ReviewRow) => r.answer ? encodePrice(r.answer, r.identifierDecoded) : undefined
@@ -205,15 +236,28 @@ function App({ opts, onDone }: { opts: ReviewOpts; onDone: (rows: ReviewRow[] | 
         )
     }
     if (view === 'docs') {
-        const text = ancillaryText(row.ancillaryData)
+        const doc = docs[cursor]
+        const text = doc?.text ?? ancillaryText(row.ancillaryData)
+        const description = text && (descriptionFromText(text) ?? text)
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
                 {statusLine}
                 <Text> </Text>
-                {text
-                    ? <Text wrap="wrap">{text.length > 1600 ? text.slice(0, 1600) + ' […]' : text}</Text>
-                    : <Text dimColor wrap="wrap">Ancillary data carries no readable text (cross-chain request — only a hash is posted on mainnet). Full request docs live on the origin chain; see the dApp or the Discord thread (c).</Text>}
+                {description
+                    ? <Text wrap="wrap">{description.length > 1200 ? description.slice(0, 1200) + ' […]' : description}</Text>
+                    : doc?.textDone
+                        ? <Text dimColor wrap="wrap">Question text can't be resolved (old bridge format) — see the dApp or the Discord thread (c).</Text>
+                        : <Text dimColor>resolving question text…</Text>}
+                <Text> </Text>
+                {doc?.summary === null && <Text dimColor>fetching AI discussion summary…</Text>}
+                {Array.isArray(doc?.summary) && doc.summary.length === 0 && <Text dimColor>No AI discussion summary (yet).</Text>}
+                {Array.isArray(doc?.summary) && doc.summary.length > 0 && <>
+                    <Text bold>AI discussion summary <Text dimColor>(the dApp's, grouped by outcome — not advice)</Text></Text>
+                    {doc.summary.map(o => (
+                        <Text key={o.outcome} wrap="wrap">  <Text color={answerColor(o.outcome)} bold>{o.outcome}</Text> {o.summary.length > 500 ? o.summary.slice(0, 500) + ' […]' : o.summary}</Text>
+                    ))}
+                </>}
                 <Text> </Text>
                 <Text dimColor>ctrl+←/→ or [ ] prev/next · 1-4 v answer · d details · c comments · esc/s back</Text>
             </Box>

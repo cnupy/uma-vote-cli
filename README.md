@@ -16,7 +16,11 @@ hardware wallet you already have. No hot keys, no browser.
 - **Live results**: an interactive explorer with per-request quorum/consensus progress and
   full price distribution — navigate rounds with `ctrl+←/→`, auto-refreshing every 60s
   while the reveal phase is live (piped output keeps the plain table)
-- **Discussion**: browse each vote's Discord `#evidence-rationale` thread from the CLI
+- **Question resolution**: cross-chain requests carry only a hash on mainnet — titles and
+  descriptions resolve lazily via the voter dApp's public resolver (any origin chain) and
+  persist in `.cache/`, so the review and results show real questions with no answers file
+- **Discussion**: browse each vote's Discord `#evidence-rationale` thread and the dApp's
+  per-outcome AI summary of it from the CLI
 - **Addons**: pluggable answer sources with pre-commit verification gates (see below)
 
 ## Setup

@@ -71,6 +71,7 @@ export type RequestResult = {
     time: bigint
     ancillaryData: `0x${string}`
     question: string
+    needsTitle?: boolean        // placeholder question — UIs resolve the real title lazily
     prices: PriceSlice[]        // every distinct revealed price, sorted by tokens desc
     total: bigint
     leadingPrice: bigint
@@ -100,7 +101,7 @@ export type RoundResults = {
 // Past rounds are final, so their results persist in .cache/results/ across
 // runs (getLogs sweeps take seconds). Entries invalidate when the signing key
 // changes (my-vote markers are baked into the data) or the schema bumps.
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2
 const cachePath = (roundId: number) => path.join(ROOT, '.cache', 'results', `${roundId}.json`)
 const jsonReplacer = (_k: string, v: unknown) => typeof v === 'bigint' ? { $bigint: v.toString() } : v
 const jsonReviver = (_k: string, v: unknown) =>
@@ -199,10 +200,11 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
     // title embedded in ancillaryData (cross-chain Polymarket requests carry only
     // a hash, but direct mainnet requests often include the text) → identifier@time
     const answers: Answer[] = (await getAnswers(roundId).catch(() => undefined))?.answers ?? []
-    const questionFor = (t: RequestTally) =>
-        answers.find(x => x.ancillaryData.toLowerCase() === t.ancillaryData.toLowerCase() && (x.timestamp === undefined || BigInt(x.timestamp) === t.time))?.question
-        ?? titleFromAncillary(t.ancillaryData)
-        ?? `${decodeIdentifier(t.identifier)} @ ${t.time}`
+    const questionFor = (t: RequestTally): { question: string; needsTitle: boolean } => {
+        const known = answers.find(x => x.ancillaryData.toLowerCase() === t.ancillaryData.toLowerCase() && (x.timestamp === undefined || BigInt(x.timestamp) === t.time))?.question
+            ?? titleFromAncillary(t.ancillaryData)
+        return known ? { question: known, needsTitle: false } : { question: `${decodeIdentifier(t.identifier)} @ ${t.time}`, needsTitle: true }
+    }
 
     const requests = [...tallies.values()].map(t => {
         const prices = [...t.byPrice.entries()]
@@ -211,7 +213,7 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
         const leading = prices[0]
         return {
             identifier: t.identifier, time: t.time, ancillaryData: t.ancillaryData,
-            question: questionFor(t),
+            ...questionFor(t),
             prices, total: t.total,
             leadingPrice: leading.price, leadingTokens: leading.tokens,
             quorumOk: t.total >= minParticipation,

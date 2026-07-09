@@ -107,6 +107,7 @@ type PlannedRequest = {
     identifier: `0x${string}`; identifierDecoded: string
     time: bigint; ancillaryData: `0x${string}`
     question: string
+    needsTitle?: boolean        // placeholder question — the review resolves the real title lazily
     answer: string              // '' when the source gave nothing usable
     price?: bigint              // undefined = not committable as-is
     onchainPrice?: bigint
@@ -119,8 +120,9 @@ for (const r of active) {
     const base = { identifier: r.identifier, identifierDecoded, time: r.time, ancillaryData: r.ancillaryData }
     const answer = matchAnswer(r, pool)
     if (!answer) {
+        const title = titleFromAncillary(r.ancillaryData)
         planned.push({
-            ...base, question: titleFromAncillary(r.ancillaryData) ?? `${identifierDecoded} @ ${r.time}`, answer: '',
+            ...base, question: title ?? `${identifierDecoded} @ ${r.time}`, needsTitle: !title, answer: '',
             problem: `UNMATCHED  ${identifierDecoded} @ ${r.time} — no answer for ancillaryData ${short(r.ancillaryData)}`,
         })
         continue
@@ -180,7 +182,7 @@ if (interactive) {
     const reviewed = await reviewVotes({
         roundId, phaseEnd: phaseEndsAt(), diffAvailable: !!onchain, force,
         rows: planned.map(p => ({
-            question: p.question, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
+            question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
             time: p.time, ancillaryData: p.ancillaryData,
             answer: p.answer, sourceAnswer: p.answer || undefined, onchainPrice: p.onchainPrice,
         })),
