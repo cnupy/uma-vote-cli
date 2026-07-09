@@ -13,8 +13,9 @@ hardware wallet you already have. No hot keys, no browser.
 - **dApp-compatible encryption**: salts and encrypted vote blobs use the exact scheme
   vote.uma.xyz uses, so you can commit here and reveal in the browser (or vice versa),
   from any machine, with nothing but your wallet
-- **Live results**: per-request quorum/consensus progress and P1–P4 distribution during the
-  reveal phase, for any past round too
+- **Live results**: an interactive explorer with per-request quorum/consensus progress and
+  full price distribution — navigate rounds with `ctrl+←/→`, auto-refreshing every 60s
+  while the reveal phase is live (piped output keeps the plain table)
 - **Discussion**: browse each vote's Discord `#evidence-rationale` thread from the CLI
 - **Addons**: pluggable answer sources with pre-commit verification gates (see below)
 
@@ -36,7 +37,7 @@ UMA rounds are 48h: 24h commit (even UTC days), 24h reveal.
 nub run status        # phase, round, deadlines, your commitments vs answers
 nub run commit        # commit phase: interactive review → diff → confirm → sign
 nub run reveal        # reveal phase: chain-first (decrypts your own blobs), sign
-nub run results       # quorum/consensus/price split (--round N for history)
+nub run results       # quorum/consensus/price explorer (--round N for history)
 nub run comments      # per-vote Discord threads (--q <title substring>)
 nub run addon         # list/dispatch commands contributed by installed addons
 ```
@@ -44,7 +45,9 @@ nub run addon         # list/dispatch commands contributed by installed addons
 On a terminal, `commit` opens a full-screen review before anything is signed: ↑↓ scroll,
 `1-4` set the answer (P1–P4, or no/yes for non-multiple-choice identifiers), `v` custom
 price, `d` request details, `s` the request's docs (decoded ancillary data), `c` its
-Discord thread, `enter` review & confirm, `q` abort. Unanswered requests are skipped with
+Discord thread, `enter` review & confirm, `q` abort. The answer keys work inside every
+view, and `ctrl+←/→` (or `[`/`]`) jumps to the previous/next request without going back
+to the list; `d`/`s`/`c` switch views directly. Unanswered requests are skipped with
 a warning. `--yes` (or piping) keeps the non-interactive table flow.
 
 Flags: `--dry-run` (print multicall calldata instead of sending), `--force` (re-send all /
