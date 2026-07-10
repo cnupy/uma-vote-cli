@@ -1,4 +1,5 @@
 import readline from 'node:readline'
+import { isSecretPrompt } from '../tui'
 
 // One shared line queue for every prompt in the process. readline's question()
 // drops lines that arrive while no question is pending, which breaks piped
@@ -35,14 +36,27 @@ export function setPromptBridge(b: PromptBridge | undefined): void {
     bridge = b
 }
 
+// For nested screens that own prompts temporarily: save the current bridge,
+// register your own, restore the saved one on unmount.
+export function getPromptBridge(): PromptBridge | undefined {
+    return bridge
+}
+
 export async function ask(question: string, fallback?: string): Promise<string> {
     if (bridge) {
         const line = await bridge.ask(fallback ? `${question} [${fallback}]` : question)
         return line.trim() || fallback || ''
     }
     start()
-    process.stdout.write(fallback ? `${question} [${fallback}]: ` : `${question}: `)
+    const label = fallback ? `${question} [${fallback}]: ` : `${question}: `
+    process.stdout.write(label)
     const line = lines.shift() ?? await new Promise<string>(resolve => waiters.push(resolve))
+    // Secrets (PINs, passphrases) echo in the terminal's canonical mode —
+    // overwrite the echoed line with a masked reprint. Interactive input only:
+    // piped stdin never echoed, and the cursor would still be on the label line.
+    if (isSecretPrompt(question) && process.stdin.isTTY && process.stdout.isTTY) {
+        process.stdout.write(`\x1b[1A\x1b[2K${label}${'•'.repeat(line.trim().length)}\n`)
+    }
     return line.trim() || fallback || ''
 }
 

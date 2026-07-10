@@ -50,6 +50,16 @@ export async function getCurrentRoundId(): Promise<number> {
     return Number(await publicClient.readContract({ ...votingContract, functionName: 'getCurrentRoundId' }))
 }
 
+// Round and phase are pure time functions on-chain (VoteTiming: roundId =
+// timestamp / 172800, phase = timestamp / 86400 % 2 with 0 = commit) — these
+// local versions let a long-running UI roll over at the phase boundary
+// without an RPC. The contract calls above stay the authoritative check at
+// startup.
+export const ROUND_SECONDS = 172_800
+export const PHASE_SECONDS = 86_400
+export const derivedRoundId = (): number => Math.floor(Date.now() / 1000 / ROUND_SECONDS)
+export const derivedPhase = (): number => Math.floor(Date.now() / 1000 / PHASE_SECONDS) % 2
+
 export async function getPendingRequests(): Promise<PendingRequest[]> {
     return await publicClient.readContract({ ...votingContract, functionName: 'getPendingRequests' }) as unknown as PendingRequest[]
 }
@@ -95,13 +105,22 @@ export function encodePrice(answer: string, decodedIdentifier: string): bigint |
     return undefined
 }
 
+// Strips C0 controls (except \n) + DEL: crafted question titles could carry
+// ESC/cursor codes into Ink frames and spoof UI lines. Applied at ingestion.
+export const sanitizeText = (s: string): string => s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '')
+
+// Question title extracted from decoded ancillary/resolved text — the single
+// home of the title regexes.
+export const titleFromText = (text: string): string | undefined => {
+    const t = (/title:\s*(.*?),\s*description:/s.exec(text) ?? /q:\s*"?([^"\n]{4,})/.exec(text))?.[1]?.trim()
+    return t ? sanitizeText(t) : undefined
+}
+
 // Human-readable title embedded in ancillaryData, when present (cross-chain
 // Polymarket requests carry only a hash; direct mainnet requests often include text)
 export function titleFromAncillary(ancillaryData: `0x${string}`): string | undefined {
     try {
-        const text = Buffer.from(ancillaryData.slice(2), 'hex').toString('utf8')
-        const m = /title:\s*(.*?),\s*description:/s.exec(text) ?? /q:\s*"?([^"\n]{4,})/.exec(text)
-        return m?.[1]?.trim()
+        return titleFromText(Buffer.from(ancillaryData.slice(2), 'hex').toString('utf8'))
     } catch { return undefined }
 }
 
@@ -117,6 +136,9 @@ export type Answer = {
 
 // Answer resolution precedence: ANSWERS_FILE override → locally saved
 // answers/<roundId>.json → installed addons (see src/addons.ts).
+// NOTE: answers are returned raw — addon verifyBeforeCommit gates hash the
+// array as delivered, so nothing may mutate it before the gate. Display code
+// sanitizes questions where they are rendered (commit-flow planning).
 export async function getAnswers(roundId: number): Promise<{ source: string; answers: Answer[] } | undefined> {
     if (ANSWERS_FILE) {
         return { source: ANSWERS_FILE, answers: JSON.parse(readFileSync(ANSWERS_FILE, 'utf8')) }
@@ -272,7 +294,16 @@ export async function getEncryptedVoteEvents(
 // env vars. Values are still editable in Frame's approval window before signing.
 export const DEFAULT_TIP_GWEI = '0.0001'
 
-export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+export type FeeInfo = {
+    maxFeePerGas: bigint
+    maxPriorityFeePerGas: bigint
+    baseFee: bigint
+    maxFeeOverridden: boolean
+    tipOverridden: boolean
+}
+
+// Fee resolution without printing — TUI callers render it themselves
+export async function computeFees(): Promise<FeeInfo> {
     const maxFeeArg = argValue('max-fee') ?? process.env.MAX_FEE_GWEI
     const tipArg = argValue('tip') ?? process.env.PRIORITY_FEE_GWEI
 
@@ -281,10 +312,22 @@ export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriority
 
     const maxPriorityFeePerGas = parseGwei(tipArg ?? DEFAULT_TIP_GWEI)
     const maxFeePerGas = maxFeeArg ? parseGwei(maxFeeArg) : (baseFee * 120n) / 100n + maxPriorityFeePerGas
+    return { maxFeePerGas, maxPriorityFeePerGas, baseFee, maxFeeOverridden: !!maxFeeArg, tipOverridden: !!tipArg }
+}
 
-    console.log(`Fees: base ${formatGwei(baseFee)} gwei → max fee ${formatGwei(maxFeePerGas)} gwei ${maxFeeArg ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(maxPriorityFeePerGas)} gwei ${tipArg ? '(override)' : '(default)'}`)
-    if (maxFeePerGas < baseFee) console.log(`⚠️  max fee is below the current base fee — the tx will not be included until base fee drops.`)
-    return { maxFeePerGas, maxPriorityFeePerGas }
+export function describeFees(f: FeeInfo): string {
+    return `Fees: base ${formatGwei(f.baseFee)} gwei → max fee ${formatGwei(f.maxFeePerGas)} gwei ${f.maxFeeOverridden ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(f.maxPriorityFeePerGas)} gwei ${f.tipOverridden ? '(override)' : '(default)'}`
+}
+
+export const feeWarning = (f: FeeInfo): string | undefined =>
+    f.maxFeePerGas < f.baseFee ? '⚠️  max fee is below the current base fee — the tx will not be included until base fee drops.' : undefined
+
+export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    const fees = await computeFees()
+    console.log(describeFees(fees))
+    const warn = feeWarning(fees)
+    if (warn) console.log(warn)
+    return { maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas }
 }
 
 // ---------- batched sending ----------
@@ -296,18 +339,27 @@ export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriority
 // Warn before queuing behind a stuck transaction: a re-run gets the next pending
 // nonce and waits for the stuck tx to clear — replacing it (Frame's Speed Up,
 // same nonce + ≥10% higher fees) is usually what you actually want.
-async function pendingTxGuard(account: `0x${string}`): Promise<void> {
+// Output seam so flows running inside a mounted Ink app can capture these
+// lines instead of tearing frames with console prints. Defaults keep every
+// standalone command byte-identical. With a sink, the guard's decline throws
+// AbortSend (the app must survive) instead of the console path's process.exit.
+export type SendSink = { log(line: string): void }
+export class AbortSend extends Error { constructor() { super('Aborted — nothing sent.') } }
+
+async function pendingTxGuard(account: `0x${string}`, out?: SendSink): Promise<void> {
     const [pending, latest] = await Promise.all([
         publicClient.getTransactionCount({ address: account, blockTag: 'pending' }),
         publicClient.getTransactionCount({ address: account, blockTag: 'latest' }),
     ])
     const stuck = pending - latest
     if (stuck <= 0) return
-    console.log(`\n⚠️  ${account} has ${stuck} pending transaction(s) (nonce ${latest}${stuck > 1 ? `-${pending - 1}` : ''}).`)
-    console.log(`This transaction will be QUEUED BEHIND them and won't mine until they clear.`)
-    console.log(`If one is stuck on a low fee, use Speed Up on it in Frame instead of re-sending here.`)
+    const say = out ? out.log.bind(out) : console.log
+    say(`\n⚠️  ${account} has ${stuck} pending transaction(s) (nonce ${latest}${stuck > 1 ? `-${pending - 1}` : ''}).`)
+    say(`This transaction will be QUEUED BEHIND them and won't mine until they clear.`)
+    say(`If one is stuck on a low fee, use Speed Up on it in Frame instead of re-sending here.`)
     const reply = await ask(`Queue behind the pending transaction(s) anyway? (y/N)`)
     if (!/^y(es)?$/i.test(reply)) {
+        if (out) throw new AbortSend()
         console.log('Aborted — nothing sent.')
         process.exit(0)
     }
@@ -318,24 +370,27 @@ export async function sendMulticallBatched(
     account: `0x${string}`,
     fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint },
     label: string,
+    out?: SendSink,
 ): Promise<`0x${string}`[]> {
-    await pendingTxGuard(account)
+    const say = out ? out.log.bind(out) : console.log
+    await pendingTxGuard(account, out)
     const wallet = await getWallet()
     const send = async (batch: `0x${string}`[]): Promise<`0x${string}`> => {
         const txHash = await wallet.client.writeContract({
             ...votingContract, functionName: 'multicall', args: [batch],
             account: wallet.account, chain: wallet.client.chain, ...fees,
         })
-        console.log(`Sent: https://etherscan.io/tx/${txHash}`)
+        say(`Sent: https://etherscan.io/tx/${txHash}`)
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
         if (receipt.status !== 'success') throw new Error(`Transaction ${txHash} REVERTED — the ${label}s in it did NOT take effect.`)
         return txHash
     }
 
     try {
-        console.log(`\nSending ${datas.length} ${label}(s) as one multicall — confirm on your hardware wallet...`)
+        say(`\nSending ${datas.length} ${label}(s) as one multicall — confirm on your hardware wallet...`)
         return [await send(datas)]
     } catch (e) {
+        if (e instanceof AbortSend) throw e
         const msg = ((e as Error & { details?: string }).details ?? (e as Error).message ?? '')
         if (datas.length < 2 || !/invalid request|too large|payload|exceeds/i.test(msg)) throw e
 
@@ -349,11 +404,11 @@ export async function sendMulticallBatched(
         }
         if (cur.length > 0) chunks.push(cur)
 
-        console.log(`\n⚠️  Wallet rejected the large transaction (${msg.split('\n')[0]}) — likely the GridPlus Lattice ~1.5KB calldata limit.`)
-        console.log(`Splitting into ${chunks.length} smaller transaction(s); confirm EACH on the device.`)
+        say(`\n⚠️  Wallet rejected the large transaction (${msg.split('\n')[0]}) — likely the GridPlus Lattice ~1.5KB calldata limit.`)
+        say(`Splitting into ${chunks.length} smaller transaction(s); confirm EACH on the device.`)
         const hashes: `0x${string}`[] = []
         for (const [i, chunk] of chunks.entries()) {
-            console.log(`\n[${i + 1}/${chunks.length}] Sending ${chunk.length} ${label}(s)...`)
+            say(`\n[${i + 1}/${chunks.length}] Sending ${chunk.length} ${label}(s)...`)
             hashes.push(await send(chunk))
         }
         return hashes
@@ -369,7 +424,7 @@ export function logErrorToFile(e: unknown): string {
     mkdirSync(logsDir, { recursive: true })
     const file = path.join(logsDir, `error-${new Date().toISOString().replace(/[:.]/g, '-')}.log`)
     const err = e as Error & { details?: string; metaMessages?: string[] }
-    writeFileSync(file, [
+    let dump = [
         `time: ${new Date().toISOString()}`,
         `argv: ${process.argv.join(' ')}`,
         ``,
@@ -377,7 +432,12 @@ export function logErrorToFile(e: unknown): string {
         ``,
         err?.details ? `details: ${err.details}` : '',
         err?.metaMessages ? err.metaMessages.join('\n') : '',
-    ].join('\n'))
+    ].join('\n')
+    // RPC endpoints may carry API keys — never let them land in the dump
+    for (const url of [...RPC_URLS, ...(process.env.LATTICE_RELAY_URL ? [process.env.LATTICE_RELAY_URL] : [])]) {
+        dump = dump.split(url).join('<redacted-rpc>')
+    }
+    writeFileSync(file, dump)
     return file
 }
 
@@ -400,6 +460,36 @@ process.on('unhandledRejection', friendly)
 
 export const hasFlag = (flag: string) => process.argv.includes(flag)
 
+// ANSI codes, single home (compare.ts re-exports for its older importers)
+export const GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', CYAN = '\x1b[36m', BOLD = '\x1b[1m', RESET = '\x1b[0m'
+
+// package.json is the single home of the version (the about screen shows it too)
+export function appVersion(): string {
+    try { return (JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { version?: string }).version ?? '?' } catch { return '?' }
+}
+
+// Colored usage block (plain when piped): version header, bold Usage:, cyan flags
+export function renderHelp(usage: string): string {
+    if (!process.stdout.isTTY) return `uma-vote-cli v${appVersion()}\n${usage}`
+    return `${DIM}uma-vote-cli v${appVersion()}${RESET}\n` + usage
+        .replace(/^Usage:/m, `${BOLD}Usage:${RESET}`)
+        .replace(/(--[a-zA-Z][\w-]*|(?<=\s)-[hv]\b)/g, `${CYAN}$1${RESET}`)
+}
+
+// Every command handles --help/-h and --version/-v: print and exit before
+// the command's own work starts (imported modules still load first — ES
+// import hoisting — so keep entrypoint imports side-effect-light).
+export function handleHelp(usage: string): void {
+    if (hasFlag('--version') || hasFlag('-v')) {
+        console.log(appVersion())
+        process.exit(0)
+    }
+    if (hasFlag('--help') || hasFlag('-h')) {
+        console.log(renderHelp(usage))
+        process.exit(0)
+    }
+}
+
 // Flag value in either syntax: --round 10319 or --round=10319
 export function argValue(name: string): string | undefined {
     const eq = process.argv.find(a => a.startsWith(`--${name}=`))
@@ -417,6 +507,15 @@ export function phaseEndsAt(): Date {
 export function fmtCountdown(to: Date): string {
     const s = Math.max(0, Math.floor((to.getTime() - Date.now()) / 1000))
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+// "45s" / "12m 3s" / "1h 10m" / "2d 5h" — the two most significant units
+export function fmtAgo(since: number): string {
+    const s = Math.max(0, Math.floor((Date.now() - since) / 1000))
+    if (s < 60) return `${s}s`
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`
 }
 
 export function short(hex: string, n = 10): string {

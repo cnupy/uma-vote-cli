@@ -3,8 +3,13 @@
 // vote.uma.xyz published when you committed through it. If decryption succeeds,
 // the signing message matches production and browser reveal will work for
 // commits made by this tool (and vice versa).
-import { getWalletAccount, getEncryptedVoteEvents, decodeIdentifier } from './common'
+import { getWalletAccount, getEncryptedVoteEvents, decodeIdentifier, handleHelp } from './common'
 import { getSigningKey, decryptVote, SIGNING_MESSAGE } from './crypto'
+
+handleHelp(`Usage: nub run verify-key
+Derive the vote-encryption key via your wallet and prove it decrypts one of
+your own past on-chain EncryptedVote blobs (dApp compatibility check).
+Touches the signer. No options. --help, -h show this help.`)
 
 const account = await getWalletAccount()
 console.log(`Account: ${account}`)
@@ -13,7 +18,7 @@ console.log(`Signing message: "${SIGNING_MESSAGE}"\n`)
 const key = await getSigningKey(account)
 
 console.log(`Scanning last ~50k blocks (~7 days) for your EncryptedVote events...`)
-const events = (await getEncryptedVoteEvents(account)).filter(e => e.encryptedVote !== '0x')
+const events = (await getEncryptedVoteEvents(account, undefined, 50_000n)).filter(e => e.encryptedVote !== '0x')
 if (events.length === 0) {
     console.error(`No EncryptedVote blobs found for ${account}. Commit once via vote.uma.xyz first, then re-run.`)
     process.exit(1)

@@ -56,6 +56,7 @@ nub run status         # always start here — tells you what to do next
 nub run commit         # commit day: review + adjust answers → encrypt → one multicall → confirm on device
 nub run reveal         # reveal day: one multicall → confirm on device
 nub run results        # watch quorum/consensus and how your votes line up
+nub run uma            # the whole flow as one app: votes page + staking header + actions
 ```
 
 `commit` gets its answers from an installed addon, `ANSWERS_FILE=<path>` or a saved

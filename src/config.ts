@@ -40,6 +40,14 @@ export const ROUNDS_DIR = process.env.ROUNDS_DIR
     ? path.resolve(ROOT, process.env.ROUNDS_DIR)
     : path.join(ROOT, 'rounds')
 
+// UMA's official voting-v2 subgraph (slashes, vote counts) — the same source
+// vote.uma.xyz uses.
+export const SUBGRAPH_URL = process.env.SUBGRAPH_URL ?? 'https://api.goldsky.com/api/public/project_clus2fndawbcc01w31192938i/subgraphs/mainnet-voting-v2/0.1.1/gn'
+
+// The voter dApp — its public endpoints resolve cross-chain questions and
+// serve the Discord-thread cache.
+export const DAPP_URL = 'https://vote.uma.xyz'
+
 // GitHub API auth: GITHUB_TOKEN env → gh CLI session → anonymous (60 req/h)
 function resolveGithubToken(): string | undefined {
     if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN

@@ -23,7 +23,9 @@ export type AnswerSourcePlugin = {
     verifyBeforeCommit?(roundId: number, answers: Answer[]): Promise<{ ok: boolean; detail: string }>
     /** Print provenance / trust warnings before the vote table. */
     report?(roundId: number): Promise<void>
-    /** Extra commands, dispatched by `nub run addon <name>` (process.argv is preserved). */
+    /** Extra commands, dispatched by `nub run addon <command>` — or
+     *  `nub run addon <addon> <command>` when two addons share a command name
+     *  (the unqualified form refuses ambiguity). process.argv is preserved. */
     commands?: Record<string, { description: string; run(argv: string[]): Promise<void> }>
 }
 

@@ -9,15 +9,25 @@ import { parseAbiItem } from 'viem'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { ROOT } from './config'
-import { publicClient, votingContract, decodeIdentifier, getAnswers, titleFromAncillary, type Answer } from './common'
+import { publicClient, votingContract, decodeIdentifier, getAnswers, titleFromAncillary, titleFromText, derivedRoundId, ROUND_SECONDS as ROUND_SECONDS_N, PHASE_SECONDS as PHASE_SECONDS_N, P1_VALUE, P2_VALUE, P3_VALUE, P4_VALUE, type Answer } from './common'
 import { getOnChainCommitments, priceLabel, GREEN, RED, DIM, RESET } from './compare'
+import { voterIdentity } from './crypto'
+import { fetchVoteSlashes, slashFor, roundSlashStats, fmtSlash, type VoteSlashes, type VoteSlash } from './slashes'
 
-const voteRevealedEvent = parseAbiItem(
+// ~10-char slash column cell: signed amount (green/red), dim "pending" for
+// entries the voter's slashing trackers haven't settled (NEVER shown as 0),
+// blank when the voter had nothing at stake
+const renderSlashCell = (s: VoteSlash | undefined): string =>
+    !s ? ` ${' '.repeat(10)}`
+        : s.pending ? ` ${DIM}${'pending'.padStart(10)}${RESET}`
+        : ` ${Number(s.slashAmount) < 0 ? RED : GREEN}${fmtSlash(s.slashAmount).padStart(10)}${RESET}`
+
+export const voteRevealedEvent = parseAbiItem(
     'event VoteRevealed(address indexed voter, address indexed caller, uint32 roundId, bytes32 indexed identifier, uint256 time, bytes ancillaryData, int256 price, uint128 numTokens)'
 )
 
-const ROUND_SECONDS = 172_800n
-const PHASE_SECONDS = 86_400n
+const ROUND_SECONDS = BigInt(ROUND_SECONDS_N)
+const PHASE_SECONDS = BigInt(PHASE_SECONDS_N)
 
 // Find the last block at or below `ts` by Newton iteration on the ~12s slot
 // time (converges in a few probes). Clamped to post-merge blocks: nodes with
@@ -91,8 +101,9 @@ export type RoundResults = {
     minAgreement: bigint
     cumulativeStake: bigint
     requests: RequestResult[]
-    // Address my-vote markers are matched against; undefined = no cached signing
-    // key, so votes CANNOT be marked (callers must surface this, not show "none")
+    // Address my-vote markers are matched against (EXPECTED_VOTER, else the
+    // cached signing key); undefined = no identity at all, so votes CANNOT be
+    // marked (callers must surface this, not show "none")
     myAddress?: string
     fetchedAt: number
 }
@@ -106,16 +117,19 @@ const cachePath = (roundId: number) => path.join(ROOT, '.cache', 'results', `${r
 const jsonReplacer = (_k: string, v: unknown) => typeof v === 'bigint' ? { $bigint: v.toString() } : v
 const jsonReviver = (_k: string, v: unknown) =>
     v && typeof v === 'object' && '$bigint' in (v as object) ? BigInt((v as { $bigint: string }).$bigint) : v
-const isFinal = (roundId: number) => roundId < Math.floor(Date.now() / 1000 / Number(ROUND_SECONDS))
+// A round is final once its 48h window has fully elapsed
+export const isFinal = (roundId: number) => roundId < derivedRoundId()
 
-export async function fetchRoundResults(roundId: number, fresh = false): Promise<RoundResults> {
+// onProgress receives short human-readable stage lines ("scanning reveal
+// logs — chunk 3/8") so a UI can show liveness during the multi-second sweep
+export async function fetchRoundResults(roundId: number, fresh = false, onProgress?: (stage: string) => void): Promise<RoundResults> {
     if (!fresh && isFinal(roundId) && existsSync(cachePath(roundId))) {
         try {
             const c = JSON.parse(readFileSync(cachePath(roundId), 'utf8'), jsonReviver) as { version: number; data: RoundResults }
             if (c.version === CACHE_VERSION && c.data.myAddress === currentMyAddress()) return c.data
         } catch { /* unreadable cache entry — refetch below overwrites it */ }
     }
-    const data = await fetchRoundResultsUncached(roundId)
+    const data = await fetchRoundResultsUncached(roundId, onProgress)
     if (isFinal(roundId)) {
         try {
             mkdirSync(path.dirname(cachePath(roundId)), { recursive: true })
@@ -125,14 +139,13 @@ export async function fetchRoundResults(roundId: number, fresh = false): Promise
     return data
 }
 
-const currentMyAddress = (): string | undefined => {
-    const keyCache = path.join(ROOT, '.signing-key.json')
-    if (!existsSync(keyCache)) return undefined
-    const cache = JSON.parse(readFileSync(keyCache, 'utf8')) as Record<string, { address: string }>
-    return Object.values(cache)[0]?.address.toLowerCase()
-}
+// Reveal logs are public, so marking "my" votes needs only an ADDRESS —
+// EXPECTED_VOTER works without any signing key (the key is only needed to
+// decrypt unrevealed commitments for the "cmtd" marker).
+const currentMyAddress = (): string | undefined => voterIdentity()
 
-async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults> {
+async function fetchRoundResultsUncached(roundId: number, onProgress?: (stage: string) => void): Promise<RoundResults> {
+    onProgress?.('reading round parameters')
     const round = await publicClient.readContract({
         ...votingContract, functionName: 'rounds', args: [BigInt(roundId)],
     }) as readonly [string, bigint, bigint, bigint, number]
@@ -148,6 +161,7 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
     const roundEndTs = BigInt(roundId + 1) * ROUND_SECONDS
     const latest = await publicClient.getBlock()
     if (latest.timestamp < revealStartTs) return { ...base, status: 'not-started', fetchedAt: Date.now() }
+    onProgress?.('locating the reveal-phase block range')
     const fromBlock = await findBlockByTimestamp(revealStartTs)
     const toBlock = latest.timestamp < roundEndTs ? latest.number : await findBlockByTimestamp(roundEndTs)
 
@@ -172,7 +186,10 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
     }
     const CHUNK = 9_000n
     const logs = []
+    const chunks = Number((toBlock - fromBlock) / CHUNK) + 1
+    let chunk = 0
     for (let from = fromBlock; from <= toBlock; from += CHUNK) {
+        onProgress?.(`scanning reveal logs — chunk ${++chunk}/${chunks}`)
         logs.push(...await getLogsRange(from, from + CHUNK - 1n > toBlock ? toBlock : from + CHUNK - 1n))
     }
 
@@ -194,6 +211,7 @@ async function fetchRoundResultsUncached(roundId: number): Promise<RoundResults>
     if (tallies.size === 0) return { ...base, status: 'no-reveals', fetchedAt: Date.now() }
 
     // My unrevealed commitments → gray "committed" marker
+    onProgress?.('checking your commitments')
     const myCommits = await getOnChainCommitments(roundId).catch(() => undefined)
 
     // Question titles: local answers cache → GitHub (past rounds are merged) →
@@ -233,6 +251,20 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
         return
     }
 
+    // Placeholder questions (hash-only cross-chain requests with no answers
+    // file) resolve BEFORE rendering — a static table can't fill them in
+    // lazily like the explorer does. .cache/ancillary hits are instant;
+    // misses ask the dApp resolver once and persist. Failures keep the
+    // identifier@time placeholder.
+    if (d.status === 'ok' && d.requests.some(r => r.needsTitle)) {
+        const { resolveAncillaryText, mapLimit } = await import('./resolve')
+        await mapLimit(d.requests.filter(r => r.needsTitle), 5, async r => {
+            const text = await resolveAncillaryText(r.identifier, r.time, r.ancillaryData)
+            const title = text && titleFromText(text)
+            if (title) { r.question = title; r.needsTitle = false }
+        })
+    }
+
     console.log(`Round ${roundId}: staked ${fmtTokens(d.cumulativeStake)} · quorum needs ${fmtTokens(d.minParticipation)} revealed · consensus needs ${fmtTokens(d.minAgreement)} on one outcome`)
     if (d.status === 'not-started') {
         console.log(`Reveal phase hasn't started yet.`)
@@ -243,10 +275,18 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
         return
     }
 
-    const P = { P1: 0n, P2: 1_000000000000000000n, P3: 500000000000000000n, P4: -57896044618658097711785492504343953926634992332820282019728792003956564819968n }
+    const P = { P1: P1_VALUE, P2: P2_VALUE, P3: P3_VALUE, P4: P4_VALUE }
 
-    console.log(`\n  #  Mine     Question                                  Quorum                Consensus             P1      P2      P3      P4      other`)
-    console.log(`  ${'-'.repeat(138)}`)
+    // Per-vote UMA earned/lost via slashing — the Earnings column shows on
+    // every final round; without a voter identity (no signing key) or a
+    // subgraph answer its cells are a dim "-"
+    let slashes: VoteSlashes | undefined
+    const showEarnings = isFinal(roundId)
+    const slashVoter = d.myAddress
+    if (showEarnings && slashVoter) slashes = await fetchVoteSlashes(slashVoter)
+
+    console.log(`\n  #  Mine${showEarnings ? `${'Earnings'.padStart(15)} ` : '     '}Question                                  Quorum                Consensus             P1      P2      P3      P4      other`)
+    console.log(`  ${'-'.repeat(showEarnings ? 149 : 138)}`)
     let row = 0, passing = 0
     for (const t of d.requests) {
         row++
@@ -268,10 +308,27 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
 
         const quorum = `${pctOfThreshold(t.total, d.minParticipation).padStart(6)} ${fmtTokens(t.total)}/${fmtTokens(d.minParticipation)}${t.quorumOk ? '✓' : '✗'}`
         const consensus = `${pctOfThreshold(t.leadingTokens, d.minAgreement).padStart(6)} ${fmtTokens(t.leadingTokens)}/${fmtTokens(d.minAgreement)}${t.consensusOk ? '✓' : '✗'}`
-        console.log(`  ${String(row).padStart(2)}  ${mine} ${t.question.slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}`)
+
+        const earningsCell = !showEarnings ? ''
+            // Rolled requests settle in a later round — their slash entry
+            // (keyed per request, not per round) must not show here
+            : (!t.quorumOk || !t.consensusOk) ? ` ${DIM}${'rolled'.padStart(10)}${RESET}`
+            : slashes ? renderSlashCell(slashFor(slashes, t.identifier, t.time, t.ancillaryData))
+            : ` ${DIM}${'-'.padStart(10)}${RESET}`
+        console.log(`  ${String(row).padStart(2)}  ${mine}${earningsCell} ${t.question.slice(0, 40).padEnd(41)} ${quorum.padEnd(21)} ${consensus.padEnd(21)} ${pctOf(P.P1)} ${pctOf(P.P2)} ${pctOf(P.P3)} ${pctOf(P.P4)} ${other}`)
     }
     console.log(`\n${passing}/${d.requests.length} request(s) currently pass quorum + consensus.`)
+    if (slashes) {
+        const { net, pending, matched } = roundSlashStats(slashes, d.requests)
+        if (matched > 0) {
+            const netStr = `${net > 0 ? '+' : ''}${net.toFixed(3)}`
+            console.log(`Your net for round ${roundId}: ${net < 0 ? RED : GREEN}${netStr} UMA${RESET}${pending > 0 ? `${DIM} · ${pending} pending${RESET}` : ''}`)
+        }
+    }
+    if (showEarnings) {
+        console.log(`${DIM}Earnings: UMA earned/lost through slashing (UMA subgraph) · pending = trackers not settled yet · rolled = settles in a later round · - = unknown (no signing key).${RESET}`)
+    }
     console.log(`${DIM}Quorum/Consensus: progress toward the threshold (revealed/required · leading-outcome/required), capped at 100%.${RESET}`)
     console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · – = no vote${RESET}`)
-    if (!d.myAddress) console.log(`⚠️  Your votes can't be marked — no .signing-key.json (run \`nub run verify-key\` once).`)
+    if (!d.myAddress) console.log(`⚠️  Your votes can't be marked — no EXPECTED_VOTER and no .signing-key.json (run \`nub run init\` or \`nub run verify-key\`).`)
 }

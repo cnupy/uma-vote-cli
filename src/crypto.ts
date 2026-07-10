@@ -2,7 +2,7 @@ import EthCrypto from 'eth-crypto'
 import { keccak256, encodePacked } from 'viem'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
-import { ROOT } from './config'
+import { ROOT, EXPECTED_VOTER } from './config'
 import { getWallet } from './common'
 
 // Must match the voter dApp's NEXT_PUBLIC_SIGNING_MESSAGE for vote.uma.xyz to be
@@ -10,6 +10,15 @@ import { getWallet } from './common'
 export const SIGNING_MESSAGE = process.env.SIGNING_MESSAGE ?? 'Login to UMA Voter dApp'
 
 const KEY_CACHE = path.join(ROOT, '.signing-key.json')
+
+// The voter identity as a lowercase address, without touching the wallet:
+// EXPECTED_VOTER takes precedence, else the first cached signing-key entry.
+export function voterIdentity(): `0x${string}` | undefined {
+    if (EXPECTED_VOTER) return EXPECTED_VOTER.toLowerCase() as `0x${string}`
+    if (!existsSync(KEY_CACHE)) return undefined
+    const cache = JSON.parse(readFileSync(KEY_CACHE, 'utf8')) as Record<string, { address: string }>
+    return Object.values(cache)[0]?.address.toLowerCase() as `0x${string}` | undefined
+}
 
 export type SigningKey = {
     address: `0x${string}`
@@ -45,7 +54,7 @@ export async function getSigningKey(account: `0x${string}`): Promise<SigningKey>
 
     const cached = existsSync(KEY_CACHE) ? JSON.parse(readFileSync(KEY_CACHE, 'utf8')) : {}
     cached[account.toLowerCase()] = key
-    writeFileSync(KEY_CACHE, JSON.stringify(cached, null, 2))
+    writeFileSync(KEY_CACHE, JSON.stringify(cached, null, 2), { mode: 0o600 }) // owner-only on POSIX (no-op on Windows)
     console.log(`Signing key cached in .signing-key.json (keep private — it decrypts your vote blobs).`)
     return key
 }

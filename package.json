@@ -1,6 +1,6 @@
 {
   "name": "uma-vote-cli",
-  "version": "0.1.0",
+  "version": "26.7.0",
   "description": "General-purpose CLI for UMA VotingV2: commit/reveal voting with hardware wallets, live round results, Discord discussion threads, and pluggable answer-source addons",
   "license": "MIT",
   "repository": "github:cnupy/uma-vote-cli",
@@ -12,7 +12,8 @@
     "commit": "nub src/commit.ts",
     "reveal": "nub src/reveal.ts",
     "results": "nub src/results.ts",
-    "comments": "nub src/comments.ts",
+    "uma": "nub src/uma.ts",
+    "questions": "nub src/questions.ts",
     "verify-key": "nub src/verify-key.ts",
     "addon": "nub src/run-addon.ts"
   },

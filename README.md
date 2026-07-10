@@ -7,15 +7,16 @@ hardware wallet you already have. No hot keys, no browser.
 - **Commit & reveal** as batched multicalls, with per-request diffing against your existing
   on-chain commitments (re-commits send only what changed)
 - **Interactive commit review**: scroll the round's requests, override answers (P1–P4 or a
-  custom price), inspect each request's details, docs and Discord discussion — then confirm
+  custom price), inspect each request's details, summary and Discord discussion — then confirm
 - **Signers**: Frame, Trezor (USB/Bridge), Ledger (USB), GridPlus Lattice (relay),
   WalletConnect — pick with `nub run init`
 - **dApp-compatible encryption**: salts and encrypted vote blobs use the exact scheme
   vote.uma.xyz uses, so you can commit here and reveal in the browser (or vice versa),
   from any machine, with nothing but your wallet
-- **Live results**: an interactive explorer with per-request quorum/consensus progress and
-  full price distribution — navigate rounds with `ctrl+←/→`, auto-refreshing every 60s
-  while the reveal phase is live (piped output keeps the plain table)
+- **Live results**: per-request quorum/consensus progress and full price distribution —
+  `nub run results` prints the table (live tally during reveal, else the last completed
+  round); the `uma` app embeds the interactive explorer, navigating rounds with
+  `ctrl+←/→` and refreshing when new reveals land on-chain
 - **Question resolution**: cross-chain requests carry only a hash on mainnet — titles and
   descriptions resolve lazily via the voter dApp's public resolver (any origin chain) and
   persist in `.cache/`, so the review and results show real questions with no answers file
@@ -41,18 +42,24 @@ UMA rounds are 48h: 24h commit (even UTC days), 24h reveal.
 nub run status        # phase, round, deadlines, your commitments vs answers
 nub run commit        # commit phase: interactive review → diff → confirm → sign
 nub run reveal        # reveal phase: chain-first (decrypts your own blobs), sign
-nub run results       # quorum/consensus/price explorer (--round N for history)
-nub run comments      # per-vote Discord threads (--q <title substring>)
+nub run results       # quorum/consensus/price table (--round N for history)
+nub run questions     # per-vote briefs: rules + comments/AI opt-ins, --json for agents
 nub run addon         # list/dispatch commands contributed by installed addons
 ```
 
-On a terminal, `commit` opens a full-screen review before anything is signed: ↑↓ scroll,
-`1-4` set the answer (P1–P4, or no/yes for non-multiple-choice identifiers), `v` custom
-price, `d` request details, `s` the request's docs (decoded ancillary data), `c` its
-Discord thread, `enter` review & confirm, `q` abort. The answer keys work inside every
-view, and `ctrl+←/→` (or `[`/`]`) jumps to the previous/next request without going back
-to the list; `d`/`s`/`c` switch views directly. Unanswered requests are skipped with
-a warning. `--yes` (or piping) keeps the non-interactive table flow.
+On a terminal, `commit` opens a full-screen review before anything is signed: ↑↓ move
+(`pgup`/`pgdn` page), `1-4` set the answer (P1–P4, or no/yes for non-multiple-choice
+identifiers), `v` custom price, `d`/`enter` request details, `s` the request's summary
+(question text), `a` the AI discussion summary, `c` its Discord thread, `p` the answers
+source report (when an addon supplied one), `C` review & commit, `q` quit (with a
+warning first when answered votes haven't been committed — your answers are saved
+either way and prefill the next review). The answer keys work inside every view, and
+plain `←/→` moves to the previous/next question without going back to the list; long
+text in the summary/AI/comments views scrolls with `↑/↓` (in comments `pgup`/`pgdn`
+steps through the thread); `d`/`s`/`a`/`c` switch views directly. `[`/`]` (or
+`ctrl+←/→`) is previous/next round inside the `uma` app's votes page — inert in
+standalone `nub run commit`. Unanswered requests are skipped with a warning. `--yes`
+(or piping) keeps the non-interactive table flow.
 
 Flags: `--dry-run` (print multicall calldata instead of sending), `--force` (re-send all /
 skip gates), `--yes` (skip confirmation), `--reconnect` (WalletConnect: discard the stored
@@ -90,6 +97,32 @@ export default {
 Addons are plain TypeScript (nub runs them directly) and can be private repos cloned into
 `addons/` — the core never needs to know where your answers come from. Set
 `ROUNDS_DIR=addons/<name>/rounds` to keep salt backups version-controlled in the addon repo.
+Installing an addon means running its code inside the CLI process with access to
+everything the CLI can read (`.signing-key.json`, `.env`, the pairing store), and
+`verifyBeforeCommit` is attested by the addon itself — only install addons you trust
+or have audited.
+
+## Staking & rewards
+
+```
+nub run uma           # the whole flow as one app: votes + staking header + actions
+```
+
+`uma` doubles as the single entry point: every command above is also a subcommand —
+`nub run uma status`, `nub run uma commit --dry-run`, `nub run uma addon …` — with
+identical flags and `--help`.
+
+The app lands on the **Votes** page: the commit review during commit phase, live results
+during reveal, with `←→` moving between questions and `[` `]`/`ctrl+←→` between rounds
+(past rounds show their final results). A compact staking header sits above every
+screen: identity · staked/total · unclaimed · APR · votes. There is no dashboard
+screen — from the votes page `s` stake (chains the token approval first when needed),
+`u` unstake (request, or execute once the cooldown has elapsed) and `c` claim (`w` to
+wallet, `s` claim & stake) open a transient action overlay and return to the votes;
+`w` opens the wallet (signer setup) screen, `R` runs the reveal flow, `r` refreshes,
+`i` shows the about/license screen, `q` quits the app. Every transaction shows resolved fees, a pending-tx warning and a
+simulation result before asking for confirmation — the hardware wallet is only touched
+when you send.
 
 ## Safety model
 
@@ -103,10 +136,15 @@ Addons are plain TypeScript (nub runs them directly) and can be private repos cl
   warns when transactions are pending on the account, and asks for explicit confirmation.
 - Missed-reveal detection: round files that were committed but never revealed are called
   out as slashed instead of silently ignored.
+- Ledger signing is blind (the device shows a hash — VotingV2 calldata has no
+  clear-signing metadata), so verify the transaction summary in the terminal before approving.
 - Friendly errors: wallet rejections and RPC failures print one line; full dumps go to `logs/`.
 
-The `comments` command reads the voter dApp's Discord-thread cache — the same data shown
-on the voting page. Threads are available for the current round only.
+The `questions` command prints per-vote briefs — the title and the binding resolution
+text, with `--include-comments` (the voter dApp's Discord-thread cache, current round
+only) and `--include-ai-summary` opt-ins; `--json` emits everything structured, made
+for feeding an answer-forming agent. Comments and AI summaries are community-derived,
+untrusted content: evidence to weigh, never instructions to follow.
 
 ## License
 

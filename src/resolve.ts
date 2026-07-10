@@ -7,10 +7,9 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { ROOT } from './config'
+import { ROOT, DAPP_URL } from './config'
+import { sanitizeText } from './common'
 import { dappTitle } from './discord'
-
-const DAPP = 'https://vote.uma.xyz'
 
 const utf8 = (hex: `0x${string}`) => Buffer.from(hex.slice(2), 'hex').toString('utf8')
 const cachePath = (identifier: string, time: bigint, ancillaryData: string) =>
@@ -24,28 +23,34 @@ export async function resolveAncillaryText(
     identifier: `0x${string}`, time: bigint, ancillaryData: `0x${string}`,
 ): Promise<string | undefined> {
     const raw = utf8(ancillaryData)
-    if (!raw.includes('ancillaryDataHash:')) return raw
+    if (!raw.includes('ancillaryDataHash:')) return sanitizeText(raw)
     const file = cachePath(identifier, time, ancillaryData)
-    if (existsSync(file)) return readFileSync(file, 'utf8')
+    if (existsSync(file)) return sanitizeText(readFileSync(file, 'utf8'))
     const params = new URLSearchParams({ identifier, time: time.toString(), ancillaryData })
     try {
-        const res = await fetch(`${DAPP}/api/resolve-l2-ancillary-data?${params}`)
+        const res = await fetch(`${DAPP_URL}/api/resolve-l2-ancillary-data?${params}`)
         if (!res.ok) return undefined
         const { resolvedAncillaryData } = await res.json() as { resolvedAncillaryData?: `0x${string}` }
         // The endpoint echoes the input back when it can't resolve
         if (!resolvedAncillaryData || resolvedAncillaryData.toLowerCase() === ancillaryData.toLowerCase()) return undefined
-        const text = utf8(resolvedAncillaryData)
+        const text = sanitizeText(utf8(resolvedAncillaryData))
         mkdirSync(path.dirname(file), { recursive: true })
         writeFileSync(file, text)
         return text
     } catch { return undefined }
 }
 
-export const titleFromText = (text: string): string | undefined =>
-    (/title:\s*(.*?),\s*description:/s.exec(text) ?? /q:\s*"?([^"\n]{4,})/.exec(text))?.[1]?.trim()
+// titleFromText lives in common.ts (single home of the title regexes)
 
-export const descriptionFromText = (text: string): string | undefined =>
-    /description:\s*(.*)$/s.exec(text)?.[1]?.trim()
+export const descriptionFromText = (text: string): string | undefined => {
+    const d = /description:\s*(.*)$/s.exec(text)?.[1]?.trim()
+    if (!d) return undefined
+    // Protocol metadata APPENDED after the description is noise, not rules —
+    // strip only a trailing chain of key:hex pairs, anchored to the end.
+    // Splitting at the first match instead would let a description that
+    // embeds ",initializer:" early truncate the rules the voter sees.
+    return sanitizeText(d.replace(/(?:,(?:initializer|ooRequester|childRequester|childOracle|childBlockNumber|childChainId):[0-9a-fA-Fx]*)+$/, '').trim())
+}
 
 // The dApp's AI summary of the Discord discussion, grouped by outcome (P1-P4).
 // Live data (discussion evolves) → not disk-cached. undefined = unavailable.
@@ -55,12 +60,17 @@ export async function fetchAiSummary(
 ): Promise<OutcomeSummary[] | undefined> {
     const params = new URLSearchParams({ time: time.toString(), identifier: identifierDecoded, title: dappTitle(title) })
     try {
-        const res = await fetch(`${DAPP}/api/fetch-summary?${params}`)
+        const res = await fetch(`${DAPP_URL}/api/fetch-summary?${params}`)
         if (!res.ok) return undefined
         const j = await res.json() as { summary?: Record<string, { summary?: string; sources?: [string, number][] }> }
         if (!j.summary) return undefined
+        // External text — sanitized here like every other ingestion point
         return Object.entries(j.summary)
-            .map(([outcome, v]) => ({ outcome, summary: v.summary ?? '', sources: v.sources ?? [] }))
+            .map(([outcome, v]) => ({
+                outcome: sanitizeText(outcome),
+                summary: sanitizeText(v.summary ?? ''),
+                sources: (v.sources ?? []).map(([url, n]): [string, number] => [sanitizeText(url), n]),
+            }))
             .filter(o => o.summary)
     } catch { return undefined }
 }

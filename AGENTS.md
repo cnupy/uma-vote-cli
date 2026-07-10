@@ -42,5 +42,6 @@ Hardware-wallet signing is pluggable (`SIGNER` env: `frame` default, `trezor`, `
 `lattice`, `walletconnect`) — backends live in `src/signers/`, each exposing a viem
 wallet client + account. `nub run init` is the interactive setup that configures and
 tests a connector, then writes `.env`. Read-only commands (`status`, `results`,
-`comments`, addon commands) never touch the signer; only `commit`, `reveal` and
-`verify-key` do.
+`questions`, addon commands) never touch the signer; only `commit`, `reveal`,
+`verify-key` and `uma` do (`uma` stakes/claims/commits/reveals from inside the app —
+still read-only until an action needs the signer).

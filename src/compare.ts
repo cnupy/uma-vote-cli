@@ -5,7 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { ROOT, EXPECTED_VOTER } from './config'
-import { getEncryptedVoteEvents, decodeIdentifier, encodePrice, type Answer } from './common'
+import { getEncryptedVoteEvents, decodeIdentifier, encodePrice, P1_VALUE, P2_VALUE, P3_VALUE, type Answer } from './common'
 import { decryptVote } from './crypto'
 
 export type OnChainCommitment = {
@@ -28,6 +28,9 @@ export async function getOnChainCommitments(roundId: number): Promise<{ address:
     if (events.length === 0) return undefined
     const commitments: OnChainCommitment[] = []
     for (const ev of events) {
+        // ECIES decryption is synchronous CPU-bound math — yield between votes
+        // so an embedding Ink UI keeps processing input during the sweep
+        await new Promise(resolve => setImmediate(resolve))
         try {
             const { price } = await decryptVote(key.privateKey, ev.encryptedVote)
             commitments.push({ identifier: ev.identifier, time: ev.time, ancillaryData: ev.ancillaryData, price: BigInt(price) })
@@ -46,10 +49,11 @@ export function takeCommitment(pool: OnChainCommitment[], ancillaryData: string,
 }
 
 export const priceLabel = (p: bigint) =>
-    p === 0n ? 'P1/no' : p === 1_000000000000000000n ? 'P2/yes' : p === 500000000000000000n ? 'P3' : 'P4'
+    p === P1_VALUE ? 'P1/no' : p === P2_VALUE ? 'P2/yes' : p === P3_VALUE ? 'P3' : 'P4'
 
 // ANSI colors for diff tables
-export const GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', RESET = '\x1b[0m'
+import { GREEN, RED, DIM, RESET } from './common'
+export { GREEN, RED, DIM, CYAN, BOLD, RESET } from './common'
 
 // Answer table, colored against existing on-chain commitments when provided:
 // green = matches, red = differs (shows committed value), dim = not committed.

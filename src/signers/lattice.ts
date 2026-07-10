@@ -12,7 +12,7 @@ import type { Wallet } from './types'
 // holds it can request signatures, though every one still needs on-device approval.
 const STORE = path.join(ROOT, '.lattice-client.json')
 
-type Store = { deviceId: string; password: string; clientData?: string }
+type Store = { deviceId: string; password: string; name?: string; clientData?: string }
 
 // GridPlus Lattice1 via a relay — GridPlus cloud by default, or a self-hosted
 // lattice-connect relay (LATTICE_RELAY_URL). Signs with the standard ETH path
@@ -26,11 +26,32 @@ export async function connect(): Promise<Wallet> {
     const baseUrl = process.env.LATTICE_RELAY_URL ?? 'https://signing.gridpl.us'
 
     // deviceId + password + name deterministically derive the pairing key, so
-    // the same store re-pairs silently after the first approval on the device
+    // the same store re-pairs silently after the first approval on the device.
+    // New stores get a random per-folder instance suffix in the name: the
+    // device/relay allows one session per app name, so two checkouts pairing
+    // as the same name lock each other out ("already connected"). Legacy
+    // stores without a name keep 'uma-voter' to preserve their pairing.
     const store: Store = (stored?.deviceId === deviceId ? stored : undefined)
-        ?? { deviceId, password: randomBytes(24).toString('hex') }
-    const save = () => writeFileSync(STORE, JSON.stringify(store, null, 2))
+        ?? { deviceId, password: randomBytes(24).toString('hex'), name: `uma-voter-${10 + Math.floor(Math.random() * 90)}` }
+    const save = () => writeFileSync(STORE, JSON.stringify(store, null, 2), { mode: 0o600 }) // owner-only on POSIX (no-op on Windows)
     save()
+
+    // gridplus-sdk fetches the contract ABI from Etherscan's retired V1 API
+    // to decode calldata on-device; that fetch fails with a noisy stack trace
+    // and falls back to 4byte.directory, which works. Benign — drop exactly
+    // that noise during signing, pass every other console line through.
+    const SDK_NOISE = /deprecated V1 endpoint|Invalid JSON in response|Fetching data from external network failed|Falling back to 4byte|Failed to fetch ABI/i
+    const quietSdkNoise = async <T>(fn: () => Promise<T>): Promise<T> => {
+        const orig = { log: console.log, warn: console.warn, error: console.error }
+        const filter = (write: (...args: unknown[]) => void) => (...args: unknown[]) => {
+            if (args.some(a => SDK_NOISE.test(a instanceof Error ? a.message : String(a)))) return
+            write(...args)
+        }
+        console.log = filter(orig.log)
+        console.warn = filter(orig.warn)
+        console.error = filter(orig.error)
+        try { return await fn() } finally { Object.assign(console, orig) }
+    }
 
     // A locked Lattice can't be unlocked remotely (PIN is on-device only) —
     // wait for the user instead of failing, incl. mid-run auto-lock timeouts.
@@ -46,7 +67,7 @@ export async function connect(): Promise<Wallet> {
     }
 
     const isPaired = await withUnlockRetry(() => gp.setup({
-        deviceId, password: store.password, name: 'uma-voter', baseUrl, // pairing name kept for existing device pairings
+        deviceId, password: store.password, name: store.name ?? 'uma-voter', baseUrl, // legacy stores predate per-instance names
         getStoredClient: async () => store.clientData ?? '',
         setStoredClient: async (clientData: string | null) => { store.clientData = clientData ?? undefined; save() },
     }))
@@ -87,7 +108,7 @@ export async function connect(): Promise<Wallet> {
             return `0x${r.slice(2)}${s.slice(2)}${(27 + yParity).toString(16)}` as `0x${string}`
         },
         async signTransaction(tx) {
-            const res = await withUnlockRetry(() => gp.sign(tx as TransactionSerializable))
+            const res = await withUnlockRetry(() => quietSdkNoise(() => gp.sign(tx as TransactionSerializable)))
             if (!res.sig) throw new Error(`Lattice signTransaction failed${res.err ? `: ${res.err}` : ''}`)
             const r = sigHex(res.sig.r), s = sigHex(res.sig.s)
             const yParity = await findYParity(keccak256(serializeTransaction(tx)), r, s)

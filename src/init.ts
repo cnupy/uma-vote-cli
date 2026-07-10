@@ -4,8 +4,16 @@
 // keep the original readline flow below.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { getAddress } from 'viem'
+import type { WizardDeps } from './init-ui'
+import { handleHelp } from './common'
 import { ROOT, EXPECTED_VOTER } from './config'
+
+handleHelp(`Usage: nub run init
+Guided signer setup: pick a connector, configure and test it, write .env.
+Interactive (wizard on a TTY, plain prompts piped). No options.
+--help, -h show this help.`)
 import { SIGNER_KINDS, type SignerKind, type Wallet, getWallet } from './signers'
 import { ask, note } from './signers/prompt'
 import { DEFAULT_TREZOR_PATH } from './signers/trezor'
@@ -91,12 +99,13 @@ async function connectSigner(kind: SignerKind, updates: Record<string, string>):
     return getAddress((await (await backends[kind]()).connect()).account.address)
 }
 
-const current = (process.env.SIGNER ?? 'frame').toLowerCase()
-
-if (process.stdin.isTTY && process.stdout.isTTY) {
-    const { runInitWizard } = await import('./init-ui')
-    const outcome = await runInitWizard({
-        current,
+// Everything the ink wizard needs, wired to this module's helpers. Also
+// constructed by the uma dashboard's wallet screen (wallet-screen.tsx), which
+// embeds the same wizard; `current` is read at call time so a signer switched
+// earlier in the same process shows up on re-entry.
+export function makeWizardDeps(): WizardDeps {
+    return {
+        current: (process.env.SIGNER ?? 'frame').toLowerCase(),
         kinds: SIGNER_KINDS,
         descriptions: DESCRIPTIONS,
         nextSteps: NEXT_STEPS,
@@ -104,51 +113,64 @@ if (process.stdin.isTTY && process.stdout.isTTY) {
         connect: connectSigner,
         askPin: (updates, address) => askPin(updates, address, note),
         writeEnv,
-    })
+    }
+}
+
+// Everything below is the `nub run init` entrypoint script — skipped when
+// this module is imported for makeWizardDeps (the wallet screen), so the
+// import stays side-effect free.
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (isMain && process.stdin.isTTY && process.stdout.isTTY) {
+    const { runInitWizard } = await import('./init-ui')
+    const outcome = await runInitWizard(makeWizardDeps())
     process.exit(outcome === 'failed' ? 1 : 0)
 }
 
 // Original readline flow — non-TTY (piped) runs.
-console.log(`uma-vote-cli signer setup — current signer: ${current}\n`)
-for (const [i, kind] of SIGNER_KINDS.entries()) {
-    console.log(`  ${i + 1}) ${kind.padEnd(14)} ${DESCRIPTIONS[kind]}`)
+if (isMain) {
+    const current = (process.env.SIGNER ?? 'frame').toLowerCase()
+    console.log(`uma-vote-cli signer setup — current signer: ${current}\n`)
+    for (const [i, kind] of SIGNER_KINDS.entries()) {
+        console.log(`  ${i + 1}) ${kind.padEnd(14)} ${DESCRIPTIONS[kind]}`)
+    }
+
+    const choice = await ask(`\nConnector (1-${SIGNER_KINDS.length} or name)`, current)
+    const kind = (SIGNER_KINDS[Number(choice) - 1] ?? choice.toLowerCase()) as SignerKind
+    if (!SIGNER_KINDS.includes(kind)) {
+        console.error(`Not a connector: "${choice}"`)
+        process.exit(1)
+    }
+
+    console.log('')
+    let updates: Record<string, string>
+    try {
+        updates = await askSettings(kind, text => console.log(text))
+    } catch (e) {
+        console.error((e as Error).message)
+        process.exit(1)
+    }
+
+    // Connect through the real backend so the wizard proves the exact same path
+    // the vote commands will use (this also runs first-time pairing flows).
+    Object.assign(process.env, updates)
+    console.log(`\nConnecting via ${kind}...`)
+    let address: `0x${string}`
+    try {
+        address = getAddress((await getWallet()).account.address)
+    } catch (e) {
+        console.error(`\n❌ ${(e as Error).message}`)
+        console.error('Nothing was saved. Fix the issue and re-run `nub run init`.')
+        process.exit(1)
+    }
+    console.log(`✓ Connected. Account: ${address}`)
+
+    await askPin(updates, address, text => console.log(text))
+
+    writeEnv(updates)
+
+    console.log(`\n✅ Saved to .env:`)
+    for (const [key, value] of Object.entries(updates)) console.log(`   ${key}=${value}`)
+    console.log(`\n${NEXT_STEPS}`)
+    process.exit(0)
 }
-
-const choice = await ask(`\nConnector (1-${SIGNER_KINDS.length} or name)`, current)
-const kind = (SIGNER_KINDS[Number(choice) - 1] ?? choice.toLowerCase()) as SignerKind
-if (!SIGNER_KINDS.includes(kind)) {
-    console.error(`Not a connector: "${choice}"`)
-    process.exit(1)
-}
-
-console.log('')
-let updates: Record<string, string>
-try {
-    updates = await askSettings(kind, text => console.log(text))
-} catch (e) {
-    console.error((e as Error).message)
-    process.exit(1)
-}
-
-// Connect through the real backend so the wizard proves the exact same path
-// the vote commands will use (this also runs first-time pairing flows).
-Object.assign(process.env, updates)
-console.log(`\nConnecting via ${kind}...`)
-let address: `0x${string}`
-try {
-    address = getAddress((await getWallet()).account.address)
-} catch (e) {
-    console.error(`\n❌ ${(e as Error).message}`)
-    console.error('Nothing was saved. Fix the issue and re-run `nub run init`.')
-    process.exit(1)
-}
-console.log(`✓ Connected. Account: ${address}`)
-
-await askPin(updates, address, text => console.log(text))
-
-writeEnv(updates)
-
-console.log(`\n✅ Saved to .env:`)
-for (const [key, value] of Object.entries(updates)) console.log(`   ${key}=${value}`)
-console.log(`\n${NEXT_STEPS}`)
-process.exit(0)
