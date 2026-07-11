@@ -28,7 +28,7 @@ import { logErrorToFile, sanitizeText } from './common'
 import { setPromptBridge, getPromptBridge } from './signers/prompt'
 import { runCommitFlow } from './flows/commit-flow'
 import { CommitReview, type ReviewOpts, type ReviewOutcome } from './commit-ui'
-import { SPINNER, roundNavDelta, maskBuf, linkifyUrls } from './tui'
+import { SPINNER, roundNavDelta, maskBuf, linkifyUrls, isQrBlock } from './tui'
 import type { OutputSink } from './flows/sink'
 
 const TAIL = 16   // log panel shows only the last lines, keeping the frame short
@@ -54,6 +54,9 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     const [error, setError] = useState<string | undefined>()
     const [frame, setFrame] = useState(0)
     const [runId, setRunId] = useState(0)   // bumped by the done-panel restart key
+    // A pairing QR renders full-height in its own slot — the tailed log
+    // window would cut it in half. Flow progress (a sink line) clears it.
+    const [qr, setQr] = useState<string[] | undefined>()
     // Review quit via its exit guard: leave immediately when the flow winds
     // down — the guard was the confirmation, a second "aborted" stop is noise
     const abortedRef = useRef(false)
@@ -67,7 +70,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
         const prev = getPromptBridge()
         setPromptBridge({
             ask: question => new Promise(resolve => { setPromptBuf(''); setPrompt({ question, resolve }) }),
-            note: text => setLines(l => [...l, ...toLines(text)]),
+            note: text => isQrBlock(text) ? setQr(sanitizeText(text).split('\n')) : setLines(l => [...l, ...toLines(text)]),
         })
         return () => {
             setPromptBridge(prev)
@@ -84,7 +87,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     // output back in the log panel. A restarted flow prefills from the
     // answers the previous review saved (confirmed or aborted).
     useEffect(() => {
-        const push = (color?: string) => (text: string) => setLines(l => [...l, ...toLines(text, color)])
+        const push = (color?: string) => (text: string) => { setQr(undefined); setLines(l => [...l, ...toLines(text, color)]) }
         const out: OutputSink = { log: push(), warn: push('yellow'), error: push('red') }
         runCommitFlow({
             dryRun: false, force: false, yes: false, interactive: true, out,
@@ -169,11 +172,14 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     // the terminal's final frame
     if (abortedRef.current) return null
 
-    const tail = lines.slice(-TAIL)
+    // While a pairing QR is up it owns the frame — shrink the log tail so the
+    // whole code stays scannable on a normal-height terminal
+    const tail = lines.slice(-(qr ? 3 : TAIL))
     return (
         <Box flexDirection="column" borderStyle="round" paddingX={1}>
             <Text bold>Commit votes</Text>
-            {lines.length > TAIL && <Text dimColor>▲ {lines.length - TAIL} earlier line(s)</Text>}
+            {qr && qr.map((l, i) => <Text key={`q${i}`}>{l || ' '}</Text>)}
+            {lines.length > tail.length && <Text dimColor>▲ {lines.length - tail.length} earlier line(s)</Text>}
             {tail.map((l, i) => <Text key={i} color={l.color} wrap="wrap">{l.text || ' '}</Text>)}
             {running && !prompt && <Text><Text color="cyan">{SPINNER[frame % SPINNER.length]}</Text> working…</Text>}
             {prompt && <Text>{prompt.question}: <Text color="cyan">{maskBuf(prompt.question, promptBuf)}</Text><Text inverse> </Text></Text>}

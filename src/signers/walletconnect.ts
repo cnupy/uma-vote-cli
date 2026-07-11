@@ -28,7 +28,10 @@ export async function connect(): Promise<Wallet> {
     }
     const provider = await EthereumProvider.init({
         projectId,
-        chains: [mainnet.id],
+        // optionalChains, NOT chains: requiring the namespace makes several
+        // wallets (Rabby mobile among them) settle a session the SDK rejects,
+        // so enable() hangs forever after the wallet-side confirm
+        optionalChains: [mainnet.id],
         rpcMap: { [mainnet.id]: RPC_URLS[0] },
         showQrModal: false,
         metadata: { name: 'uma-vote-cli', description: 'UMA VotingV2 CLI', url: 'https://github.com/cnupy/uma-vote-cli', icons: [] },
@@ -51,6 +54,22 @@ export async function connect(): Promise<Wallet> {
     if (accounts.length === 0) throw new Error('WalletConnect session has no account.')
     const address = getAddress(accounts[0])
 
-    const client = createWalletClient({ chain: mainnet, transport: custom(provider) })
+    // A session can also die MID-RUN (the wallet drops it; the relay then logs
+    // "No matching key" noise for its leftovers) — with the app open across
+    // phase boundaries that's routine, and the SDK then throws "Please call
+    // connect() before request()". Re-pair with a fresh QR and retry once;
+    // safe for sends too, since the failed attempt never reached the wallet.
+    const request = async (args: { method: string; params?: unknown }): Promise<unknown> => {
+        try {
+            return await provider.request(args)
+        } catch (e) {
+            const msg = (e as Error)?.message ?? String(e)
+            if (!/call connect\(\) before request/i.test(msg)) throw e
+            note('WalletConnect session was dropped by the wallet — pairing again.')
+            await provider.connect()
+            return await provider.request(args)
+        }
+    }
+    const client = createWalletClient({ chain: mainnet, transport: custom({ request }) })
     return { kind: 'walletconnect', client, account: toAccount(address) }
 }

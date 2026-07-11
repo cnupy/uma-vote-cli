@@ -13,7 +13,7 @@ import { Box, Text, useInput } from 'ink'
 import { logErrorToFile, sanitizeText } from './common'
 import { setPromptBridge, getPromptBridge } from './signers/prompt'
 import { runRevealFlow } from './flows/reveal-flow'
-import { SPINNER, maskBuf, linkifyUrls } from './tui'
+import { SPINNER, maskBuf, linkifyUrls, isQrBlock } from './tui'
 import type { OutputSink } from './flows/sink'
 
 const WINDOW = 16
@@ -34,8 +34,15 @@ export function RevealScreen({ onExit }: { onExit: () => void }) {
     const [prompt, setPrompt] = useState<Prompt | undefined>()
     const [promptBuf, setPromptBuf] = useState('')
     const [frame, setFrame] = useState(0)
+    // A pairing QR renders full-height in its own slot — the tailed log
+    // window would cut it in half. Flow progress (a sink line) clears it.
+    const [qr, setQr] = useState<string[] | undefined>()
 
-    const append = (line: string) => setLines(prev => [...prev, ...linkifyUrls(sanitizeText(stripAnsi(line))).split('\n')])
+    const append = (line: string, fromSink = false) => {
+        if (fromSink) setQr(undefined)
+        else if (isQrBlock(line)) { setQr(sanitizeText(stripAnsi(line)).split('\n')); return }
+        setLines(prev => [...prev, ...linkifyUrls(sanitizeText(stripAnsi(line))).split('\n')])
+    }
 
     // Own the prompt bridge while mounted: the dashboard stays mounted (hidden)
     // underneath with its bridge registered, and its prompts would render on
@@ -61,7 +68,7 @@ export function RevealScreen({ onExit }: { onExit: () => void }) {
     // mirrors a plain `nub run reveal`. Signer/RPC errors propagate as throws:
     // first line rendered friendly, full details to the error log file.
     useEffect(() => {
-        const sink: OutputSink = { log: append, warn: append, error: append }
+        const sink: OutputSink = { log: l => append(l, true), warn: l => append(l, true), error: l => append(l, true) }
         runRevealFlow({ dryRun: false, force: false, out: sink })
             .then(code => setOutcome({ kind: 'done', code }))
             .catch(e => {
@@ -96,7 +103,9 @@ export function RevealScreen({ onExit }: { onExit: () => void }) {
         onExit()
     })
 
-    const shown = lines.slice(-WINDOW)
+    // While a pairing QR is up it owns the frame — shrink the log tail so the
+    // whole code stays scannable on a normal-height terminal
+    const shown = lines.slice(-(qr ? 3 : WINDOW))
     const hidden = lines.length - shown.length
     return (
         <Box flexDirection="column" borderStyle="round" paddingX={1}>
@@ -107,6 +116,7 @@ export function RevealScreen({ onExit }: { onExit: () => void }) {
                         ? <Text color={outcome.code === 0 ? 'green' : 'yellow'}>{outcome.code === 0 ? 'reveal — done' : 'reveal — finished with problems (see above)'}</Text>
                         : <Text color="red">reveal — failed</Text>}
             </Text>
+            {qr && qr.map((l, i) => <Text key={`q${i}`}>{l || ' '}</Text>)}
             <Text dimColor>{hidden > 0 ? `▲ ${hidden} more` : '─'.repeat(10)}</Text>
             {shown.map((l, i) => <Text key={hidden + i} wrap="truncate-end">{l || ' '}</Text>)}
             {prompt && <Text>{prompt.question}: <Text color="cyan">{maskBuf(prompt.question, promptBuf)}</Text><Text inverse> </Text></Text>}

@@ -11,6 +11,11 @@ export const isSecretPrompt = (question: string): boolean => /pin|passphrase|pas
 export const maskBuf = (question: string, buf: string): string =>
     isSecretPrompt(question) ? '•'.repeat(buf.length) : buf
 
+// A qrcode-terminal output block (multi-line half-block art). Screens render
+// it full-height in a dedicated slot — a tailed log window would cut it in
+// half, making the pairing QR unscannable.
+export const isQrBlock = (text: string): boolean => text.split('\n').length > 8 && /[█▄▀]/.test(text)
+
 // OSC 8 terminal hyperlink: the label is ctrl+clickable with the full URL
 // attached (Windows Terminal, iTerm2, …) — unlike raw URL text, it survives
 // shortening and never depends on the URL fitting on one line.
