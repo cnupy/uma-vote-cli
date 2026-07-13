@@ -20,7 +20,7 @@ import { getOnChainCommitments, takeCommitment, priceLabel, GREEN, RED, DIM, RES
 import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
     getPendingRequests, getVoterFromDelegate, matchAnswer, decodeIdentifier, encodePrice,
-    randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, short, computeFees, describeFees, feeWarning,
+    randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, short, computeFees, describeFees, feeWarning,
     sendMulticallBatched, AbortSend, getAnswers, titleFromAncillary, sanitizeText, type StoredVote, type Answer,
 } from '../common'
 import type { ReviewOpts, ReviewOutcome } from '../commit-ui'
@@ -47,7 +47,18 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     const out = opts.out ?? consoleSink
     const review = opts.review ?? (async (o: ReviewOpts) => (await import('../commit-ui')).reviewVotes(o))
 
-    const phase = await getVotePhase()
+    let phase = await getVotePhase()
+    // Phase-boundary lag: the contract derives the phase from the LATEST
+    // BLOCK's timestamp, which trails the wall clock by up to a block or two
+    // right after 00:00 UTC — while the app's rollover has already mounted
+    // this flow. Wait for the chain to cross instead of bailing.
+    if (phase !== 0 && derivedPhase() === 0) {
+        out.log('Chain still shows the reveal phase (latest block predates the boundary) — waiting for it to cross…')
+        for (let i = 0; i < 12 && phase !== 0; i++) {
+            await new Promise(resolve => setTimeout(resolve, 15_000))
+            phase = await getVotePhase().catch(() => phase)
+        }
+    }
     if (phase !== 0) {
         out.error(`Not commit phase (current phase: reveal). Commit phase starts ${phaseEndsAt().toISOString()}.`)
         return 1

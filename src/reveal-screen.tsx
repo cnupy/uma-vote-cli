@@ -41,7 +41,8 @@ export function RevealScreen({ onExit }: { onExit: () => void }) {
     const append = (line: string, fromSink = false) => {
         if (fromSink) setQr(undefined)
         else if (isQrBlock(line)) { setQr(sanitizeText(stripAnsi(line)).split('\n')); return }
-        setLines(prev => [...prev, ...linkifyUrls(sanitizeText(stripAnsi(line))).split('\n')])
+        // capped: the app can live for days — an unbounded log grows forever
+        setLines(prev => [...prev, ...linkifyUrls(sanitizeText(stripAnsi(line))).split('\n')].slice(-200))
     }
 
     // Own the prompt bridge while mounted: the dashboard stays mounted (hidden)

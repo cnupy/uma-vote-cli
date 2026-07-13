@@ -43,6 +43,9 @@ type Review = { opts: ReviewOpts; resolve: (outcome: ReviewOutcome) => void }
 const toLines = (text: string, color?: string): Line[] =>
     linkifyUrls(sanitizeText(text)).split('\n').map(t => ({ text: t, color }))
 
+// capped: the app can live for days — an unbounded log grows forever
+const appendLines = (prev: Line[], add: Line[]): Line[] => [...prev, ...add].slice(-200)
+
 export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { onExit: () => void; active?: boolean; onRoundNav?: (delta: -1 | 1) => void; onAbout?: () => void }) {
     const [lines, setLines] = useState<Line[]>([])
     const [review, setReview] = useState<Review | undefined>()
@@ -70,7 +73,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
         const prev = getPromptBridge()
         setPromptBridge({
             ask: question => new Promise(resolve => { setPromptBuf(''); setPrompt({ question, resolve }) }),
-            note: text => isQrBlock(text) ? setQr(sanitizeText(text).split('\n')) : setLines(l => [...l, ...toLines(text)]),
+            note: text => isQrBlock(text) ? setQr(sanitizeText(text).split('\n')) : setLines(l => appendLines(l, toLines(text))),
         })
         return () => {
             setPromptBridge(prev)
@@ -87,7 +90,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     // output back in the log panel. A restarted flow prefills from the
     // answers the previous review saved (confirmed or aborted).
     useEffect(() => {
-        const push = (color?: string) => (text: string) => { setQr(undefined); setLines(l => [...l, ...toLines(text, color)]) }
+        const push = (color?: string) => (text: string) => { setQr(undefined); setLines(l => appendLines(l, toLines(text, color))) }
         const out: OutputSink = { log: push(), warn: push('yellow'), error: push('red') }
         runCommitFlow({
             dryRun: false, force: false, yes: false, interactive: true, out,

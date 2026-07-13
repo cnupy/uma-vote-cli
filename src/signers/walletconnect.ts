@@ -26,6 +26,12 @@ export async function connect(): Promise<Wallet> {
         note('--reconnect: discarding the stored WalletConnect session — a new pairing QR follows.')
         rmSync(db, { recursive: true, force: true })
     }
+    // The WC SDK instruments every relay message with performance.measure and
+    // never clears — after ~1M entries node prints a buffer warning STRAIGHT
+    // to stderr, which corrupts an Ink frame mid-render. Drain periodically.
+    const { performance } = await import('node:perf_hooks')
+    setInterval(() => { performance.clearMeasures(); performance.clearMarks() }, 60_000).unref()
+
     const provider = await EthereumProvider.init({
         projectId,
         // optionalChains, NOT chains: requiring the namespace makes several
@@ -54,6 +60,21 @@ export async function connect(): Promise<Wallet> {
     if (accounts.length === 0) throw new Error('WalletConnect session has no account.')
     const address = getAddress(accounts[0])
 
+    // The relay websocket otherwise stays open for the app's whole lifetime,
+    // receiving and RECORDING messages (the SDK retains request history and
+    // relay events in memory — the prime suspect after an always-on app OOM'd
+    // at the 4GB heap cap overnight). Close the transport after 5 idle
+    // minutes: the session survives in the db, the next request reopens the
+    // socket. Best-effort — SDK internals, so every step degrades to a no-op.
+    const relayer = () => (provider as unknown as { signClient?: { core?: { relayer?: { connected: boolean; transportClose(): Promise<void>; transportOpen(): Promise<void> } } } }).signClient?.core?.relayer
+    let idleTimer: NodeJS.Timeout | undefined
+    const armIdleClose = () => {
+        clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => { relayer()?.transportClose().catch(() => { /* already closed */ }) }, 5 * 60_000)
+        idleTimer.unref?.()
+    }
+    armIdleClose()
+
     // A session can also die MID-RUN (the wallet drops it; the relay then logs
     // "No matching key" noise for its leftovers) — with the app open across
     // phase boundaries that's routine, and the SDK then throws "Please call
@@ -61,6 +82,8 @@ export async function connect(): Promise<Wallet> {
     // safe for sends too, since the failed attempt never reached the wallet.
     const request = async (args: { method: string; params?: unknown }): Promise<unknown> => {
         try {
+            const r = relayer()
+            if (r && !r.connected) await r.transportOpen().catch(() => { /* request() will surface the real error */ })
             return await provider.request(args)
         } catch (e) {
             const msg = (e as Error)?.message ?? String(e)
@@ -68,6 +91,8 @@ export async function connect(): Promise<Wallet> {
             note('WalletConnect session was dropped by the wallet — pairing again.')
             await provider.connect()
             return await provider.request(args)
+        } finally {
+            armIdleClose()
         }
     }
     const client = createWalletClient({ chain: mainnet, transport: custom({ request }) })
