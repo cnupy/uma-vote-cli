@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { getAddress } from 'viem'
 import {
     getVotePhase, getCurrentRoundId, getPendingRequests, getAnswers, loadRound,
-    phaseEndsAt, fmtCountdown, handleHelp,
+    phaseEndsAt, fmtCountdown, handleHelp, detectStuckTx,
 } from './common'
+import { voterIdentity } from './crypto'
 import { ROOT } from './config'
 
 handleHelp(`Usage: nub run status
@@ -22,6 +24,12 @@ console.log(`Phase:    ${phase === 0 ? 'COMMIT' : 'REVEAL'} — ends ${phaseEnds
 console.log(`Requests: ${active.length} votable this round (${pending.length} pending total)`)
 console.log(`Answers:  ${answers ? `${answers.answers.length} entries from ${answers.source}` : active.length > 0 ? 'none local — `nub run commit` pulls from installed addons' : 'n/a'}`)
 console.log(`Local:    ${round ? `rounds/${roundId}.json — committed: ${round.commitTxHash ?? 'no'}, revealed: ${round.revealTxHash ?? 'no'}` : 'no round file'}`)
+
+// A provably-unminable pending tx blocks every later nonce — surface it here
+// too, not only when the next send trips over it
+const voter = voterIdentity()
+const stuckTx = voter ? await detectStuckTx(getAddress(voter)).catch(() => undefined) : undefined
+if (stuckTx) console.log(`\n⚠️  Pending tx nonce ${stuckTx.nonce} is UNMINABLE (max fee ${stuckTx.capGwei} gwei < base ${stuckTx.baseGwei} gwei) — it blocks later txs; commit/reveal will offer a fee-bump replacement.`)
 
 // Reveal-phase verdicts come from the CHAIN, not the local round file — reveal
 // is chain-first, so a missing/unreachable round file must not read as "nothing

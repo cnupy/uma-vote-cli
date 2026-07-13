@@ -11,7 +11,7 @@ import path from 'node:path'
 import React, { useEffect, useRef, useState } from 'react'
 import { render, Box, Text, useInput, useApp } from 'ink'
 import { formatUnits, parseUnits, getAddress } from 'viem'
-import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, type FeeInfo } from './common'
+import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, recordSentTx, type FeeInfo } from './common'
 import { setPromptBridge } from './signers/prompt'
 import { SPINNER, maskBuf, linkifyUrls } from './tui'
 import { type ExplorerOpts } from './results-ui'
@@ -132,6 +132,15 @@ function StakingOverlay({ voter, active, header, pendingAction, refreshTick, onD
                     setNotice({ text: 'Aborted — nothing sent.' })
                     return
                 }
+                // The quote can go stale while the user sits on the confirm —
+                // a max fee below the CURRENT base guarantees a stuck tx that
+                // also blocks later nonces. Abort with a re-run hint instead.
+                const baseNow = (await publicClient.getBlock()).baseFeePerGas ?? 0n
+                if (baseNow > fees.maxFeePerGas) {
+                    setTx(undefined)
+                    setNotice({ text: `⚠ Base fee rose to ${formatUnits(baseNow, 9)} gwei — above the quoted max ${formatUnits(fees.maxFeePerGas, 9)} gwei; nothing sent. Run the action again to re-quote.`, color: 'yellow' })
+                    return
+                }
                 setTx({ plans, index: i, stage: 'sending', fees })
                 // Lazy wallet connect: only the first send touches the signer
                 const wallet = await getWallet()
@@ -142,6 +151,7 @@ function StakingOverlay({ voter, active, header, pendingAction, refreshTick, onD
                     args: plan.args as never, account: wallet.account, chain: wallet.client.chain,
                     maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
                 })
+                recordSentTx(hash)
                 setTx({ plans, index: i, stage: 'mining', fees, hash })
                 const receipt = await publicClient.waitForTransactionReceipt({ hash })
                 if (receipt.status !== 'success') throw new Error(`Transaction ${hash} REVERTED — the ${plan.label} did not take effect.`)

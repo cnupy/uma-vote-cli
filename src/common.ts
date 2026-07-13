@@ -1,4 +1,4 @@
-import { createPublicClient, http, fallback, getAddress, encodePacked, keccak256, hexToString, parseAbiItem, parseGwei, formatGwei, parseUnits } from 'viem'
+import { createPublicClient, http, fallback, getAddress, encodePacked, encodeFunctionData, keccak256, hexToString, parseAbiItem, parseGwei, formatGwei, parseUnits } from 'viem'
 import { mainnet } from 'viem/chains'
 import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
@@ -316,7 +316,12 @@ export async function computeFees(): Promise<FeeInfo> {
 }
 
 export function describeFees(f: FeeInfo): string {
-    return `Fees: base ${formatGwei(f.baseFee)} gwei → max fee ${formatGwei(f.maxFeePerGas)} gwei ${f.maxFeeOverridden ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(f.maxPriorityFeePerGas)} gwei ${f.tipOverridden ? '(override)' : '(default)'}`
+    // Wallet-mediated signers (WalletConnect, Frame) broadcast the tx
+    // themselves — our fee fields are suggestions the wallet may re-price or
+    // even re-type (Rabby sends legacy at its own gas price). Direct-signing
+    // backends serialize the tx here, so the fees bind.
+    const walletPrices = ['walletconnect', 'frame'].includes(process.env.SIGNER ?? 'frame')
+    return `Fees: base ${formatGwei(f.baseFee)} gwei → max fee ${formatGwei(f.maxFeePerGas)} gwei ${f.maxFeeOverridden ? '(override)' : '(base + 20% + tip)'} · tip ${formatGwei(f.maxPriorityFeePerGas)} gwei ${f.tipOverridden ? '(override)' : '(default)'}${walletPrices ? '\n(suggestions — the connected wallet does the final pricing and may re-price or re-type the tx)' : ''}`
 }
 
 export const feeWarning = (f: FeeInfo): string | undefined =>
@@ -346,14 +351,109 @@ export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriority
 export type SendSink = { log(line: string): void }
 export class AbortSend extends Error { constructor() { super('Aborted — nothing sent.') } }
 
-async function pendingTxGuard(account: `0x${string}`, out?: SendSink): Promise<void> {
+// Public RPCs can't list an account's pending txs — but every tx here is
+// broadcast by this tool, so the last sent hash is recorded and stuck-tx
+// detection can inspect the one that gates the nonce queue.
+const PENDING_TX_FILE = path.join(ROOT, '.pending-tx.json')
+export function recordSentTx(hash: `0x${string}`): void {
+    try { writeFileSync(PENDING_TX_FILE, JSON.stringify({ hash })) } catch { /* best-effort */ }
+}
+
+export type StuckTx = {
+    hash: `0x${string}`; nonce: number; capGwei: string; baseGwei: string
+    tx: { to: `0x${string}` | null; input: `0x${string}`; value: bigint; gas: bigint; nonce: number; maxFeePerGas?: bigint; gasPrice?: bigint; maxPriorityFeePerGas?: bigint }
+}
+
+// The oldest pending tx, when it is provably UNMINABLE: still pending, gates
+// the nonce queue, and its fee cap is below the CURRENT base fee. undefined =
+// nothing pending, pending but minable, or a tx this tool didn't broadcast.
+export async function detectStuckTx(account: `0x${string}`): Promise<StuckTx | undefined> {
+    const [pending, latest] = await Promise.all([
+        publicClient.getTransactionCount({ address: account, blockTag: 'pending' }),
+        publicClient.getTransactionCount({ address: account, blockTag: 'latest' }),
+    ])
+    if (pending - latest <= 0) return undefined
+    let hash: `0x${string}` | undefined
+    try { hash = (JSON.parse(readFileSync(PENDING_TX_FILE, 'utf8')) as { hash?: `0x${string}` }).hash } catch { return undefined }
+    if (!hash) return undefined
+    const tx = await publicClient.getTransaction({ hash }).catch(() => undefined)
+    if (!tx || tx.blockNumber !== null || Number(tx.nonce) !== latest || tx.from.toLowerCase() !== account.toLowerCase()) return undefined
+    const base = (await publicClient.getBlock()).baseFeePerGas ?? 0n
+    const cap = tx.maxFeePerGas ?? tx.gasPrice ?? 0n
+    if (cap >= base) return undefined
+    return {
+        hash, nonce: Number(tx.nonce), capGwei: formatGwei(cap), baseGwei: formatGwei(base),
+        tx: { to: tx.to, input: tx.input, value: tx.value, gas: tx.gas, nonce: Number(tx.nonce), maxFeePerGas: tx.maxFeePerGas, gasPrice: tx.gasPrice, maxPriorityFeePerGas: tx.maxPriorityFeePerGas },
+    }
+}
+
+// Replacement pricing: current-market quote (base + 20%, live network tip
+// estimate), floored at ≥12.5% over the stuck tx — the mempool's replacement
+// minimum. Computed separately so the guard can SHOW the fees before asking.
+export async function replacementFees(stuck: StuckTx): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    const [fresh, marketTip] = await Promise.all([
+        computeFees(),
+        publicClient.estimateMaxPriorityFeePerGas().catch(() => 0n),
+    ])
+    const bump = (x?: bigint) => x === undefined ? 0n : x + x / 8n + 1n
+    const maxBig = (...xs: bigint[]) => xs.reduce((a, b) => a > b ? a : b)
+    const maxPriorityFeePerGas = maxBig(fresh.maxPriorityFeePerGas, marketTip, bump(stuck.tx.maxPriorityFeePerGas ?? stuck.tx.gasPrice))
+    const maxFeePerGas = maxBig(fresh.maxFeePerGas, bump(stuck.tx.maxFeePerGas ?? stuck.tx.gasPrice), maxPriorityFeePerGas)
+    return { maxFeePerGas, maxPriorityFeePerGas }
+}
+
+// Same payload, same nonce, replacement fees — a Speed Up through our signer.
+export async function speedUpStuckTx(stuck: StuckTx, fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }): Promise<`0x${string}`> {
+    const wallet = await getWallet()
+    const hash = await wallet.client.sendTransaction({
+        account: wallet.account, chain: wallet.client.chain,
+        to: stuck.tx.to ?? undefined, data: stuck.tx.input, value: stuck.tx.value,
+        gas: stuck.tx.gas, nonce: stuck.tx.nonce, ...fees,
+    })
+    recordSentTx(hash)
+    return hash
+}
+
+// Resolves to the settled replacement when the guard unstuck a tx (so the
+// caller can check whether that tx WAS the send it is about to make).
+type SettledReplacement = { input: `0x${string}`; hash: `0x${string}`; success: boolean }
+
+async function pendingTxGuard(account: `0x${string}`, out?: SendSink): Promise<SettledReplacement | undefined> {
     const [pending, latest] = await Promise.all([
         publicClient.getTransactionCount({ address: account, blockTag: 'pending' }),
         publicClient.getTransactionCount({ address: account, blockTag: 'latest' }),
     ])
     const stuck = pending - latest
-    if (stuck <= 0) return
+    if (stuck <= 0) return undefined
     const say = out ? out.log.bind(out) : console.log
+
+    // Autodetected unminable tx → offer the in-place fee bump. Wallet-mediated
+    // signers price and nonce themselves (an explicit nonce isn't guaranteed
+    // to survive), so there the wallet's own Speed Up is the right tool.
+    const stuckTx = await detectStuckTx(account).catch(() => undefined)
+    if (stuckTx) {
+        say(`\n⚠️  Pending tx nonce ${stuckTx.nonce} is UNMINABLE: its max fee ${stuckTx.capGwei} gwei is below the current base ${stuckTx.baseGwei} gwei — it blocks every later nonce.`)
+        if (!['walletconnect', 'frame'].includes(process.env.SIGNER ?? 'frame')) {
+            const fees = await replacementFees(stuckTx)
+            say(`Replacement fees: max ${formatGwei(fees.maxFeePerGas)} gwei · tip ${formatGwei(fees.maxPriorityFeePerGas)} gwei (current market, ≥12.5% over the stuck tx)`)
+            const reply = await ask('Replace it now (same payload and nonce, wallet confirm follows)? (y/N)')
+            if (/^y(es)?$/i.test(reply)) {
+                const replacement = await speedUpStuckTx(stuckTx, fees)
+                say(`Replacement sent: https://etherscan.io/tx/${replacement} — waiting for it to mine…`)
+                // the ORIGINAL can still win the race (base may have dipped) —
+                // either one mining unblocks the nonce
+                const receipt = await Promise.any([
+                    publicClient.waitForTransactionReceipt({ hash: replacement }),
+                    publicClient.waitForTransactionReceipt({ hash: stuckTx.hash }),
+                ])
+                say(receipt.status === 'success' ? 'Nonce unblocked — continuing.' : `⚠️  The mined tx REVERTED (${receipt.transactionHash}) — nonce unblocked, but check what it was.`)
+                return { input: stuckTx.tx.input, hash: receipt.transactionHash, success: receipt.status === 'success' }
+            }
+        } else {
+            say(`Use your wallet's Speed Up on it, then re-run.`)
+        }
+    }
+
     say(`\n⚠️  ${account} has ${stuck} pending transaction(s) (nonce ${latest}${stuck > 1 ? `-${pending - 1}` : ''}).`)
     say(`This transaction will be QUEUED BEHIND them and won't mine until they clear.`)
     say(`If one is stuck on a low fee, use Speed Up on it in Frame instead of re-sending here.`)
@@ -363,6 +463,35 @@ async function pendingTxGuard(account: `0x${string}`, out?: SendSink): Promise<v
         console.log('Aborted — nothing sent.')
         process.exit(0)
     }
+    return undefined
+}
+
+// A quoted max fee can go stale between quote and send (review time, device
+// confirms) — if the CURRENT base fee already exceeds the cap, the tx cannot
+// mine until base falls AND it blocks every later nonce. Re-quote and
+// re-confirm instead of knowingly sending a stuck tx. A --max-fee override is
+// the user pinning the cap deliberately: warn, don't requote.
+export async function ensureFreshFees(
+    fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint },
+    out?: SendSink,
+): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    const say = out ? out.log.bind(out) : console.log
+    const base = (await publicClient.getBlock()).baseFeePerGas ?? 0n
+    if (base <= fees.maxFeePerGas) return fees
+    const fresh = await computeFees()
+    if (fresh.maxFeeOverridden) {
+        say(`\n⚠️  Base fee is ${formatGwei(base)} gwei — above your pinned --max-fee ${formatGwei(fees.maxFeePerGas)} gwei; the tx will sit unmined until base falls.`)
+        return fees
+    }
+    say(`\n⚠️  Base fee rose to ${formatGwei(base)} gwei — above the quoted max fee ${formatGwei(fees.maxFeePerGas)} gwei; sending would leave the tx stuck.`)
+    say(describeFees(fresh))
+    const reply = await ask('Send with the re-quoted fees? (y/N)')
+    if (!/^y(es)?$/i.test(reply)) {
+        if (out) throw new AbortSend()
+        console.log('Aborted — nothing sent.')
+        process.exit(0)
+    }
+    return { maxFeePerGas: fresh.maxFeePerGas, maxPriorityFeePerGas: fresh.maxPriorityFeePerGas }
 }
 
 export async function sendMulticallBatched(
@@ -373,13 +502,25 @@ export async function sendMulticallBatched(
     out?: SendSink,
 ): Promise<`0x${string}`[]> {
     const say = out ? out.log.bind(out) : console.log
-    await pendingTxGuard(account, out)
+    const settled = await pendingTxGuard(account, out)
+    // The unstuck tx is often THIS very send retried (reveal/commit calldata
+    // is deterministic) — sending again would just revert ("Invalid hash
+    // reveal"). Byte-compare and stop here when the intent already mined.
+    if (settled?.success) {
+        const intended = encodeFunctionData({ abi: votingContract.abi, functionName: 'multicall', args: [datas] })
+        if (settled.input.toLowerCase() === intended.toLowerCase()) {
+            say(`\n✓ The replaced transaction WAS this ${label} multicall — already mined (${settled.hash}), nothing more to send.`)
+            return [settled.hash]
+        }
+    }
+    fees = await ensureFreshFees(fees, out)
     const wallet = await getWallet()
     const send = async (batch: `0x${string}`[]): Promise<`0x${string}`> => {
         const txHash = await wallet.client.writeContract({
             ...votingContract, functionName: 'multicall', args: [batch],
             account: wallet.account, chain: wallet.client.chain, ...fees,
         })
+        recordSentTx(txHash)
         say(`Sent: https://etherscan.io/tx/${txHash}`)
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
         if (receipt.status !== 'success') throw new Error(`Transaction ${txHash} REVERTED — the ${label}s in it did NOT take effect.`)

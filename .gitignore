@@ -3,6 +3,7 @@ node_modules/
 .signing-key.json*
 .lattice-client.json
 .walletconnect.db
+.pending-tx.json
 answers/
 rounds/
 logs/
