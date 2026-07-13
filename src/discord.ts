@@ -13,6 +13,17 @@ export type ThreadMessage = { message: string; sender: string; time: number; id:
 const sanitizeThread = (ms: ThreadMessage[]): ThreadMessage[] =>
     ms.map(m => ({ ...m, message: sanitizeText(m.message), sender: sanitizeText(m.sender), replies: m.replies && sanitizeThread(m.replies) }))
 
+// Clarifications outrank chat: messages the bot posts as
+// **Polymarket Clarification** amend the question's resolution rules, so they
+// sort before everything else (each group chronologically — the API returns
+// newest-first, which also puts "continued from previous message" parts
+// before their beginning). Applied per nesting level.
+const isClarification = (m: ThreadMessage): boolean => /\*\*\s*Polymarket Clarification/i.test(m.message)
+const sortThread = (ms: ThreadMessage[]): ThreadMessage[] =>
+    [...ms]
+        .sort((a, b) => (isClarification(b) ? 1 : 0) - (isClarification(a) ? 1 : 0) || a.time - b.time)
+        .map(m => ({ ...m, replies: m.replies && sortThread(m.replies) }))
+
 // Mirror the dApp's title normalization: >90 chars → first 87 + "..."
 export const dappTitle = (title: string) => title.length > 90 ? `${title.slice(0, 87)}...` : title
 
@@ -22,17 +33,17 @@ export async function fetchDiscordThread(time: number | string, identifierDecode
     try {
         const res = await fetch(`${DAPP_URL}/api/discord-thread?${params}`)
         if (!res.ok) return []
-        return sanitizeThread(((await res.json()) as { thread?: ThreadMessage[] }).thread ?? [])
+        return sortThread(sanitizeThread(((await res.json()) as { thread?: ThreadMessage[] }).thread ?? []))
     } catch { return [] }
 }
 
-// Depth-first flatten with reply nesting level, for one-comment-at-a-time UIs.
-// Each level is sorted chronologically — the API returns newest-first, which
-// puts "continued from previous message" parts BEFORE their beginning.
+// Depth-first flatten with reply nesting level, for one-comment-at-a-time
+// UIs. Ordering (clarifications first, then chronological) comes from
+// fetchDiscordThread — shared with the questions command and its --json.
 export function flattenThread(thread: ThreadMessage[]): Array<ThreadMessage & { depth: number }> {
     const out: Array<ThreadMessage & { depth: number }> = []
     const walk = (ms: ThreadMessage[], depth: number) => {
-        for (const m of [...ms].sort((a, b) => a.time - b.time)) { out.push({ ...m, depth }); walk(m.replies ?? [], depth + 1) }
+        for (const m of ms) { out.push({ ...m, depth }); walk(m.replies ?? [], depth + 1) }
     }
     walk(thread, 0)
     return out
