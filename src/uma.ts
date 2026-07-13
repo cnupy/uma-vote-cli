@@ -34,7 +34,7 @@ if (sub && !sub.startsWith('-')) {
 handleHelp(`Usage: nub run uma [<subcommand>] [options]
 Bare: the whole flow as one full-screen app — votes (commit review / results),
 staking header, stake/unstake/claim, reveal, wallet setup, about.
-  --reconnect   WalletConnect: discard the stored session and pair afresh
+  --reconnect   discard the stored signer session (WalletConnect/Lattice) and pair afresh
   --help, -h    show this help
 Subcommands (each with its own --help): ${Object.keys(SUBCOMMANDS).join(', ')}`)
 

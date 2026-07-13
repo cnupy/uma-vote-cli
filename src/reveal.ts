@@ -10,7 +10,7 @@ Reveal the current round's committed votes (reveal phase only).
   --force           re-send reveals the chain already has
   --max-fee <gwei>  max fee override (or MAX_FEE_GWEI)
   --tip <gwei>      priority fee override (or PRIORITY_FEE_GWEI)
-  --reconnect       WalletConnect: discard the stored session and pair afresh
+  --reconnect       discard the stored signer session (WalletConnect/Lattice) and pair afresh
   --help, -h        show this help`)
 
 // USB/WalletConnect signer sessions hold the event loop open — exit explicitly

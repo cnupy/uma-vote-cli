@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { createWalletClient, fallback, getAddress, hashMessage, http, keccak256, padHex, recoverAddress, serializeTransaction, type TransactionSerializable } from 'viem'
 import { toAccount } from 'viem/accounts'
@@ -19,6 +19,15 @@ type Store = { deviceId: string; password: string; name?: string; clientData?: s
 // m/44'/60'/0'/0/0 (the SDK's fixed signing path).
 export async function connect(): Promise<Wallet> {
     const gp = await import('gridplus-sdk')
+
+    // Stale pairing state is dangerous beyond "already connected": presenting
+    // a clientData whose device-side pairing was deleted has crash-rebooted
+    // Lattice firmware during re-pair. --reconnect discards the store for a
+    // guaranteed fresh pairing (same escape hatch as WalletConnect's).
+    if (process.argv.includes('--reconnect') && existsSync(STORE)) {
+        note('--reconnect: discarding the stored Lattice pairing — approve the fresh pairing on the device.')
+        rmSync(STORE, { force: true })
+    }
 
     const stored: Store | undefined = existsSync(STORE) ? JSON.parse(readFileSync(STORE, 'utf8')) : undefined
     const deviceId = process.env.LATTICE_DEVICE_ID ?? stored?.deviceId

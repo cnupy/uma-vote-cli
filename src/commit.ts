@@ -10,7 +10,7 @@ Commit votes for the current round (interactive review on a terminal).
   --yes             skip the review/confirmation (non-interactive table flow)
   --max-fee <gwei>  max fee override (or MAX_FEE_GWEI)
   --tip <gwei>      priority fee override (or PRIORITY_FEE_GWEI)
-  --reconnect       WalletConnect: discard the stored session and pair afresh
+  --reconnect       discard the stored signer session (WalletConnect/Lattice) and pair afresh
   --help, -h        show this help`)
 
 const dryRun = hasFlag('--dry-run')
