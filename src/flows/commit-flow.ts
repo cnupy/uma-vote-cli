@@ -35,6 +35,11 @@ export type CommitFlowOpts = {
     // comments, confirm) replaces the printed table and the y/N prompt. --yes,
     // --dry-run and piped runs keep the non-interactive table.
     interactive: boolean
+    // Force a fresh addon pull, ignoring every saved answers file (the embedded
+    // review's r key): the answers source often publishes mid-commit-phase, so a run
+    // that opened all-unanswered can re-pull without restarting the app. Prior
+    // manual answers still overlay the freshly pulled ones (blanks don't).
+    refetch?: boolean
     review?: (opts: ReviewOpts) => Promise<ReviewOutcome>  // defaults to commit-ui's reviewVotes (lazy import)
     out?: OutputSink
 }
@@ -79,8 +84,9 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
 
     // Answers: ANSWERS_FILE override → local answers/<roundId>.json → addons.
     // Installed addons then get a pre-commit verification gate and a provenance
-    // report slot (see src/addons.ts).
-    let answersResult = await getAnswers(roundId)
+    // report slot (see src/addons.ts). --refetch skips the local files so the
+    // addon pull below runs unconditionally (freshly published answers).
+    let answersResult = opts.refetch ? undefined : await getAnswers(roundId)
 
     // Nothing local — let addons pull from upstream right here (the verification
     // gate below still hash-checks whatever they deliver).
@@ -100,7 +106,7 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     if (!answersResult) {
         for (const addon of await captureConsole(out, loadAddons)) {
             if (!addon.pullAnswers) continue
-            teeSink.log(`No local answers for round ${roundId} — pulling via addon "${addon.name}"...`)
+            teeSink.log(`${opts.refetch ? `Re-fetching round ${roundId} answers` : `No local answers for round ${roundId} —`} pulling via addon "${addon.name}"...`)
             try {
                 // captureConsole: addons print progress/provenance with
                 // console.* — inside an Ink app that must land in the sink
@@ -131,21 +137,29 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     const finalAnswers = answersResult.answers
     for (const addon of finalAnswers.length > 0 ? await captureConsole(out, loadAddons) : []) {
         if (addon.verifyBeforeCommit) {
+            // A failed gate fails closed only when nobody can react: the batch
+            // path (--yes/piped/--dry-run) aborts. Interactively the ❌ is teed
+            // into the review's warnings banner instead — the human sees the
+            // divergence and either re-pulls fresh upstream answers (r) or
+            // reviews the differences deliberately before confirming. Common
+            // benign case: a stale .local.json now that the source published.
             try {
                 const v = await captureConsole(teeSink, () => addon.verifyBeforeCommit!(roundId, finalAnswers))
                 if (v.ok) teeSink.log(`✓ ${addon.name}: ${v.detail}`)
                 else {
                     teeSink.error(`\n❌ ${addon.name}: ${v.detail}`)
-                    if (!force) return 1
-                    teeSink.error(`--force set: proceeding anyway.`)
+                    if (!force && !interactive) return 1
+                    if (interactive && !force) out.log(`Opening the review with this warning — press r to re-pull upstream, or review the differences.`)
+                    else teeSink.error(`--force set: proceeding anyway.`)
                 }
             } catch (e) {
                 teeSink.error(`\n❌ ${addon.name}: verification failed (${(e as Error).message.split('\n')[0]}).`)
-                if (!force) {
+                if (!force && !interactive) {
                     out.error(`Aborting — re-run to retry, or --force to skip verification.`)
                     return 1
                 }
-                teeSink.error(`--force set: proceeding without verification.`)
+                if (interactive && !force) out.log(`Opening the review anyway — press r to re-pull upstream, or review before committing.`)
+                else teeSink.error(`--force set: proceeding without verification.`)
             }
         }
         if (addon.report) await captureConsole(teeSink, () => addon.report!(roundId))
@@ -248,7 +262,12 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         if (!answersResult.source.includes('.local.json') && existsSync(localPath)) {
             try {
                 for (const a of JSON.parse(readFileSync(localPath, 'utf8')) as Answer[]) {
-                    localEdits.set(`${a.ancillaryData}-${a.timestamp ?? ''}`.toLowerCase(), sanitizeText(a.answer))
+                    const val = sanitizeText(a.answer)
+                    // On a refetch the last review's blanks are just "no answer
+                    // yet" — they must yield to the freshly pulled answer, not
+                    // clobber it back to empty (only real typed answers overlay).
+                    if (opts.refetch && !val) continue
+                    localEdits.set(`${a.ancillaryData}-${a.timestamp ?? ''}`.toLowerCase(), val)
                 }
             } catch { /* unreadable local file — prefill from the source only */ }
         }

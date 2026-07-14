@@ -107,7 +107,7 @@ const ancillaryText = (ancillaryData: `0x${string}`): string | undefined => {
 // same thing everywhere (plain ←/→ is always prev/next question). `active`
 // (default true) hides the review without unmounting it — render null, input
 // isActive-gated off — so edited answers survive a round trip to a past round.
-export function CommitReview({ opts, onDone, onRoundNav, onAbout, active = true }: { opts: ReviewOpts; onDone: (outcome: ReviewOutcome) => void; onRoundNav?: (delta: 1 | -1) => void; onAbout?: () => void; active?: boolean }) {
+export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, active = true }: { opts: ReviewOpts; onDone: (outcome: ReviewOutcome) => void; onRoundNav?: (delta: 1 | -1) => void; onAbout?: () => void; onReload?: (rows: ReviewRow[]) => void; active?: boolean }) {
     const [rows] = useState(() => opts.rows.map(r => ({ ...r })))
     const [cursor, setCursor] = useState(0)
     const [top, setTop] = useState(0)
@@ -249,6 +249,11 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, active = true 
         // standalone these keys do nothing (bindings mean the same everywhere)
         const roundDelta = roundNavDelta(input, key)
         if (roundDelta !== 0 && view !== 'confirm' && view !== 'exit') { onRoundNav?.(roundDelta); return }
+        // r = reload: re-pull answers from the addon (embedded app only). The
+        // the source often publishes mid-commit-phase; hand the current rows up
+        // so the restart persists them and the freshly pulled answers overlay
+        // these edits. Not from the confirm/exit modals (those own y/n).
+        if (onReload && input === 'r' && view !== 'confirm' && view !== 'exit') { onReload(rows); return }
         if (view === 'provenance') {
             if (key.escape || input === 'p' || input === 'q') setView('list')
             return
@@ -461,7 +466,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, active = true 
                 {unansweredRows.length > 0 && <Text color="red" bold>⚠ {unansweredRows.length} request(s) UNANSWERED — SKIPPED, no commit (risk of no-vote slashing if they resolve):</Text>}
                 {unansweredRows.map((x, i) => <Text key={`u${i}`} color="red" wrap="truncate-end">  {x.question.slice(0, 70)}</Text>)}
                 {warnings.length > 0 && <Text> </Text>}
-                {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap">{l}</Text>)}
+                {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap">{linkifyUrls(l)}</Text>)}
                 <Text> </Text>
                 {sending.length > 0
                     ? <Text dimColor>y commit (wallet confirmation follows) · n back{unansweredRows.length > 0 ? ' and answer the red ones' : ''}</Text>
@@ -475,7 +480,10 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, active = true 
     return (
         <Box flexDirection="column">
             <Text bold> Round {opts.roundId} — commit phase, {fmtCountdown(opts.phaseEnd)} left · {rows.length} request(s) · <Text color="yellow">{sendCount} to send</Text>{unansweredRows.length > 0 ? <Text color="red"> · {unansweredRows.length} unanswered</Text> : null}{!opts.diffAvailable ? <Text color="red"> · NO DIFF{opts.force ? ' (--force)' : ''}</Text> : null}</Text>
-            {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap"> {l}</Text>)}
+            {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap"> {linkifyUrls(l)}</Text>)}
+            {/* Rollover before the source published: no answer landed for any
+                request — point the user at r to re-pull instead of answering 17 by hand */}
+            {onReload && rows.every(r => !r.sourceAnswer) && <Text color="yellow" wrap="wrap"> No answers from the source yet — press <Text bold>r</Text> to re-pull from the addon.</Text>}
             <Text dimColor> {top > 0 ? `▲ ${top} more` : '─'.repeat(10)}</Text>
             {slice.map((x, i) => {
                 const idx = top + i
@@ -500,7 +508,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, active = true 
             <Text dimColor> {top + WINDOW < rows.length ? `▼ ${rows.length - top - WINDOW} more` : '─'.repeat(10)}</Text>
             <Text> </Text>
             <Legend />
-            <Text dimColor> ↑↓/←→/pg move{roundHint} · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
+            <Text dimColor> ↑↓/←→/pg move{roundHint} · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onReload ? ' · r reload' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
         </Box>
     )
 }

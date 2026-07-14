@@ -63,8 +63,24 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     // Review quit via its exit guard: leave immediately when the flow winds
     // down — the guard was the confirmation, a second "aborted" stop is noise
     const abortedRef = useRef(false)
+    // Reload (review r): the flow winds down persisting the current answers,
+    // then restarts with refetch so the next run re-pulls fresh addon answers
+    // instead of exiting. refetchNextRef flags that one restart as a re-pull.
+    const reloadRef = useRef(false)
+    const refetchNextRef = useRef(false)
 
     const running = exitCode === undefined && error === undefined
+
+    // Restart the flow from a clean panel: bump runId (re-runs the effect) after
+    // clearing the last run's output/exit state. Shared by the done-panel enter
+    // key and the review's reload.
+    const restart = () => {
+        abortedRef.current = false
+        setLines([])
+        setExitCode(undefined)
+        setError(undefined)
+        setRunId(id => id + 1)
+    }
 
     // Own prompt bridge: the dashboard's renders into a component that's hidden
     // while this screen is up. The previous bridge is restored on unmount so
@@ -92,10 +108,15 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     useEffect(() => {
         const push = (color?: string) => (text: string) => { setQr(undefined); setLines(l => appendLines(l, toLines(text, color))) }
         const out: OutputSink = { log: push(), warn: push('yellow'), error: push('red') }
+        const refetch = refetchNextRef.current   // set only for a reload restart
+        refetchNextRef.current = false
         runCommitFlow({
-            dryRun: false, force: false, yes: false, interactive: true, out,
+            dryRun: false, force: false, yes: false, interactive: true, refetch, out,
             review: opts => new Promise(resolve => setReview({ opts, resolve })),
         }).then(code => {
+            // reload: the flow persisted the answers and returned — re-run it
+            // (refetch) instead of exiting on the aborted-review signal
+            if (reloadRef.current) { reloadRef.current = false; restart(); return }
             if (abortedRef.current) { onExit(); return }
             setExitCode(code)
         }).catch(e => {
@@ -145,13 +166,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
         // done or error: enter restarts the flow (an aborted review reopens
         // with its saved answers); q/esc leaves (with votes as the app root
         // that quits the app, so an accidental keypress must not)
-        if (key.return) {
-            abortedRef.current = false
-            setLines([])
-            setExitCode(undefined)
-            setError(undefined)
-            setRunId(id => id + 1)
-        }
+        if (key.return) restart()
         else if (input === 'q' || key.escape) onExit()
     }, { isActive: active && !review })
 
@@ -163,6 +178,16 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
             const r = review
             setReview(undefined)
             r.resolve(outcome)
+        }} onReload={rows => {
+            // Wind the flow down as an aborted review (persists these rows to
+            // .local.json), then the flow's then-handler restarts with refetch —
+            // the fresh addon answers overlay these just-saved edits.
+            reloadRef.current = true
+            refetchNextRef.current = true
+            abortedRef.current = true   // suppress the wind-down frame, like a normal abort
+            const r = review
+            setReview(undefined)
+            r.resolve({ rows, confirmed: false })
         }} />
     )
 
