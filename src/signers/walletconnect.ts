@@ -4,6 +4,7 @@ import { createWalletClient, custom, getAddress } from 'viem'
 import { toAccount } from 'viem/accounts'
 import { mainnet } from 'viem/chains'
 import { ROOT, RPC_URLS } from '../config'
+import { startPerfDrain } from '../common'
 import { note } from './prompt'
 import type { Wallet } from './types'
 
@@ -26,11 +27,11 @@ export async function connect(): Promise<Wallet> {
         note('--reconnect: discarding the stored WalletConnect session — a new pairing QR follows.')
         rmSync(db, { recursive: true, force: true })
     }
-    // The WC SDK instruments every relay message with performance.measure and
-    // never clears — after ~1M entries node prints a buffer warning STRAIGHT
-    // to stderr, which corrupts an Ink frame mid-render. Drain periodically.
-    const { performance } = await import('node:perf_hooks')
-    setInterval(() => { performance.clearMeasures(); performance.clearMarks() }, 60_000).unref()
+    // The WC SDK also instruments every relay message with performance.measure
+    // (on top of React's per-render measures) and never clears — the shared
+    // drain keeps Node's buffer from overflowing and printing to stderr
+    // mid-frame. Idempotent: a no-op if the app root already started it.
+    void startPerfDrain()
 
     const provider = await EthereumProvider.init({
         projectId,

@@ -11,7 +11,7 @@ import path from 'node:path'
 import React, { useEffect, useRef, useState } from 'react'
 import { render, Box, Text, useInput, useApp } from 'ink'
 import { formatUnits, parseUnits, getAddress } from 'viem'
-import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, recordSentTx, type FeeInfo } from './common'
+import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, recordSentTx, startPerfDrain, type FeeInfo } from './common'
 import { setPromptBridge } from './signers/prompt'
 import { SPINNER, maskBuf, linkifyUrls } from './tui'
 import { type ExplorerOpts } from './results-ui'
@@ -374,6 +374,14 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
     const [refreshTick, setRefreshTick] = useState(0)
     const optsLoading = useRef(false)
 
+    // Clean exit: Ink's unmount PERSISTS the last frame (log.done()) — quitting
+    // while the staking header is on screen strands it in the scrollback, and
+    // a post-unmount app.clear() is a no-op (line count already zeroed). So
+    // blank the whole tree first, then exit on the commit that follows: the
+    // frame Ink persists is empty.
+    const [exiting, setExiting] = useState(false)
+    useEffect(() => { if (exiting) exit() }, [exiting, exit])
+
     const fetchOpts = () => {
         if (optsLoading.current) return
         optsLoading.current = true
@@ -400,9 +408,12 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
     // Loader keys — only active on the votes screen before opts resolve,
     // when neither the overlay nor the votes screen is listening
     useInput((input, key) => {
-        if (input === 'q' || key.escape) exit()
+        if (input === 'q' || key.escape) setExiting(true)
         else if (input === 'r' && optsError) fetchOpts()
     }, { isActive: screen === 'votes' && !opts })
+
+    // Blank frame on the way out — see `exiting` above
+    if (exiting) return null
 
     return (
         <>
@@ -414,7 +425,7 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
             {/* Mounted once opts exist and kept alive across screens — cursor,
                 round data and the commit flow all survive a detour through an
                 action/wallet/reveal screen and re-render instantly on return */}
-            {opts && <VotesScreen active={screen === 'votes'} opts={opts} onExit={exit} onAction={a => {
+            {opts && <VotesScreen active={screen === 'votes'} opts={opts} onExit={() => setExiting(true)} onAction={a => {
                 if (a === 'wallet') setScreen('wallet')
                 else if (a === 'reveal') setScreen('reveal')
                 else if (a === 'about') setScreen('about')
@@ -431,11 +442,19 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
 // Full-screen dashboard; resolves when the user quits. The prompt bridge is
 // always unregistered so later readline prompts in the process are unaffected.
 export async function runUmaDashboard(voter: `0x${string}`): Promise<void> {
+    // Ink + React's dev reconciler leak performance.measure entries on every
+    // render; this long-running app would otherwise trip Node's buffer warning
+    // (and corrupt frames) after hours. Drain regardless of signer.
+    void startPerfDrain()
     const app = render(<UmaApp voter={voter} />, { exitOnCtrlC: true })
     try {
         await app.waitUntilExit()
     } finally {
-        app.clear()   // Ink leaves the last frame (the staking header) in the terminal otherwise
         setPromptBridge(undefined)
+        // UmaApp blanks its tree before exiting, so Ink persists an empty frame
+        // (app.clear() here would be a no-op — unmount already zeroed the line
+        // count). Drain stdout so uma.ts's process.exit(0) can't truncate that
+        // erase before it flushes (Windows stdout is async).
+        await new Promise<void>(resolve => { process.stdout.write('', () => resolve()) })
     }
 }

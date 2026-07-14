@@ -162,6 +162,24 @@ export async function getAnswers(roundId: number): Promise<{ source: string; ans
     return undefined
 }
 
+// React 19's reconciler dev build (which Ink loads — nub never sets NODE_ENV
+// to production) calls performance.measure on every render/commit, gated only
+// on `console.timeStamp && performance.measure` existing. Node keeps every
+// entry in the global buffer forever (browsers recycle; Node doesn't), so a
+// long-running Ink app accrues them until Node prints a
+// MaxPerformanceEntryBufferExceededWarning to stderr — which also desyncs Ink's
+// frame accounting and strands ghost frames. Drain the buffer periodically.
+// Belongs at the app root: the source is React itself, not any one signer, so
+// it must run regardless of SIGNER (WalletConnect's own drain never fires on
+// lattice). Idempotent + unref'd so it never keeps the process alive.
+let perfDrainStarted = false
+export async function startPerfDrain(): Promise<void> {
+    if (perfDrainStarted) return
+    perfDrainStarted = true
+    const { performance } = await import('node:perf_hooks')
+    setInterval(() => { performance.clearMeasures(); performance.clearMarks() }, 30_000).unref()
+}
+
 // Match each request to an answer by ancillaryData (+ timestamp when available).
 // Each answer is consumed at most once, so duplicated ancillaryData (e.g.
 // repeated ACROSS-V2 requests) resolves by timestamp instead of first-match.
