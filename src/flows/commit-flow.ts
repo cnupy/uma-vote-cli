@@ -252,34 +252,56 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     let toSend: PlannedVote[]
 
     if (interactive) {
-        // The last review's local edits (answers/<round>.local.json) reopen
-        // the review where the user left it. They overlay ONLY the review's
-        // initial answers: the verification gate and the batch path keep
-        // working on the source file as delivered (which keeps precedence),
-        // and sourceAnswer still shows the source's value for comparison.
-        const localEdits = new Map<string, string>()
+        // Reopen the review from your last saved state (answers/<round>.local.json),
+        // 3-way merged against the current source. Each saved row also recorded
+        // the source value it was based on (`source` = the basis), so we can tell
+        // an untouched copy from a deliberate override:
+        //   • untouched (saved answer == its basis) → take the CURRENT source, so
+        //     a newer committee commit wins automatically (no stale clobber);
+        //   • override, source unchanged → keep your override;
+        //   • override, source ALSO moved → newer source wins, row flagged as
+        //     diverged (your earlier choice shown so you can re-apply it).
+        // Only overlays when the source isn't the .local.json itself (then the
+        // file already IS the state). The verification gate and batch path keep
+        // working on the source as delivered; sourceAnswer still shows it.
+        type LocalAnswer = Answer & { source?: string }
+        const saved = new Map<string, { answer: string; source?: string }>()
         const localPath = path.join(ROOT, 'answers', `${roundId}.local.json`)
         if (!answersResult.source.includes('.local.json') && existsSync(localPath)) {
             try {
-                for (const a of JSON.parse(readFileSync(localPath, 'utf8')) as Answer[]) {
-                    const val = sanitizeText(a.answer)
-                    // On a refetch the last review's blanks are just "no answer
-                    // yet" — they must yield to the freshly pulled answer, not
-                    // clobber it back to empty (only real typed answers overlay).
-                    if (opts.refetch && !val) continue
-                    localEdits.set(`${a.ancillaryData}-${a.timestamp ?? ''}`.toLowerCase(), val)
+                for (const a of JSON.parse(readFileSync(localPath, 'utf8')) as LocalAnswer[]) {
+                    saved.set(`${a.ancillaryData}-${a.timestamp ?? ''}`.toLowerCase(), {
+                        answer: sanitizeText(a.answer),
+                        source: a.source === undefined ? undefined : sanitizeText(a.source),
+                    })
                 }
             } catch { /* unreadable local file — prefill from the source only */ }
         }
         const reviewed = await review({
             roundId, phaseEnd: phaseEndsAt(), diffAvailable: !!onchain, force,
             notices: addonNotices,
-            rows: planned.map(p => ({
-                question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
-                time: p.time, ancillaryData: p.ancillaryData,
-                answer: localEdits.get(`${p.ancillaryData}-${p.time}`.toLowerCase()) ?? p.answer,
-                sourceAnswer: p.answer || undefined, onchainPrice: p.onchainPrice,
-            })),
+            rows: planned.map(p => {
+                const current = p.answer   // current source value ('' when the source gave nothing)
+                const s = saved.get(`${p.ancillaryData}-${p.time}`.toLowerCase())
+                let answer = current
+                let divergedFrom: string | undefined
+                if (s) {
+                    // Legacy files predate `source`: with no recorded basis we
+                    // can't prove an override, so treat the row as untouched
+                    // (basis = the saved answer). Current source wins cleanly and
+                    // the file heals to the new format on save.
+                    const basis = s.source === undefined ? s.answer : s.source
+                    if (s.answer === basis) answer = current               // untouched → newer source wins
+                    else if (current === basis) answer = s.answer           // override, source stable → keep it
+                    else { answer = current; divergedFrom = s.answer }      // override + source moved → source wins, flag
+                }
+                return {
+                    question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
+                    time: p.time, ancillaryData: p.ancillaryData,
+                    answer,
+                    sourceAnswer: p.answer || undefined, divergedFrom, onchainPrice: p.onchainPrice,
+                }
+            }),
         })
         // Persist the review — confirmed OR aborted — so the next run prefills
         // instead of starting blank. Saved BEFORE sending (a rejected tx or a
@@ -287,12 +309,14 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         // pulled answers file is never overwritten and keeps precedence.
         toSend = []
         let unanswered = 0
-        const answered: Answer[] = []
+        const answered: LocalAnswer[] = []
         for (const r of reviewed.rows) {
-            // every row persists, blanks included — deliberately CLEARING a
-            // source-provided answer must survive a restart too (the blank
-            // overlays the source's prefill)
-            answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer })
+            // Persist every row (blanks included) WITH the source it was based on
+            // (the basis), so next run's 3-way merge can tell an untouched copy
+            // from a deliberate override — a newer source then supersedes the
+            // former but not the latter. A deliberate CLEAR (blank answer) still
+            // survives, since blank != its non-blank basis reads as an override.
+            answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer, source: r.sourceAnswer ?? '' })
             const price = r.answer ? encodePrice(r.answer, r.identifierDecoded) : undefined
             if (price === undefined) { unanswered++; continue }
             // Committing a subset is safe: VotingV2.commitVote overwrites the hash

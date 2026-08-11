@@ -284,11 +284,19 @@ export async function getEncryptedVoteEvents(
             fromBlock: from,
             toBlock: from + CHUNK - 1n > latest ? latest : from + CHUNK - 1n,
         } as const
-        try {
-            logs.push(...await publicClient.getLogs(params))
-        } catch {
-            await new Promise(r => setTimeout(r, 3000)) // free-tier rate limit — retry once
-            logs.push(...await publicClient.getLogs(params))
+        // A transient free-tier RPC blip (drpc "temporary error", rate limits)
+        // on ONE chunk must not abort the sweep: a thrown chunk zeroes the whole
+        // result, which reads as "no commitment" even when the vote is safely
+        // on-chain (and would break reveal, which shares this sweep). Retry with
+        // backoff before giving up.
+        for (let attempt = 1; ; attempt++) {
+            try {
+                logs.push(...await publicClient.getLogs(params))
+                break
+            } catch (e) {
+                if (attempt >= 4) throw e
+                await new Promise(r => setTimeout(r, 1000 * 2 ** (attempt - 1))) // 1s, 2s, 4s
+            }
         }
     }
     const byRequest = new Map<string, EncryptedVoteEvent>()

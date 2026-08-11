@@ -94,8 +94,19 @@ export async function runRevealFlow(opts: RevealFlowOpts): Promise<number> {
         return 1
     }
 
-    // Latest commitment per request, from on-chain blobs
-    const events = await getEncryptedVoteEvents(account, roundId)
+    // Latest commitment per request, from on-chain blobs. The sweep can flake
+    // on a transient RPC error; when it does but we hold a local round file
+    // (every vote + salt), reveal entirely from that rather than failing — the
+    // file is authoritative for what WE committed. Only re-throw if we'd have
+    // nothing to reveal from.
+    let events: Awaited<ReturnType<typeof getEncryptedVoteEvents>>
+    try {
+        events = await getEncryptedVoteEvents(account, roundId)
+    } catch (e) {
+        if (!(fileRound && fileRound.votes.length > 0)) throw e
+        out.warn(`Couldn't sweep on-chain commitments (${(e as Error).message.split('\n')[0]}) — revealing from rounds/${roundId}.json.`)
+        events = []
+    }
     type Reveal = { identifier: `0x${string}`; time: bigint; ancillaryData: `0x${string}`; price: bigint; salt: bigint; label: string }
     const reveals: Reveal[] = []
     const undecryptable: string[] = []

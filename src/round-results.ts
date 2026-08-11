@@ -105,6 +105,9 @@ export type RoundResults = {
     // cached signing key); undefined = no identity at all, so votes CANNOT be
     // marked (callers must surface this, not show "none")
     myAddress?: string
+    // The on-chain commitment check threw (RPC blip mid-sweep) rather than
+    // returning cleanly — unrevealed rows are "unknown" (?), not "no vote" (–)
+    myCommitCheckFailed?: boolean
     fetchedAt: number
 }
 
@@ -210,9 +213,15 @@ async function fetchRoundResultsUncached(roundId: number, onProgress?: (stage: s
     }
     if (tallies.size === 0) return { ...base, status: 'no-reveals', fetchedAt: Date.now() }
 
-    // My unrevealed commitments → gray "committed" marker
+    // My unrevealed commitments → gray "committed" marker. Distinguish a real
+    // fetch failure (RPC blip mid-sweep) from "genuinely nothing committed": the
+    // former must render as "unknown" (?), never "no vote" (–), so a transient
+    // error can't make a committed vote look lost.
     onProgress?.('checking your commitments')
-    const myCommits = await getOnChainCommitments(roundId).catch(() => undefined)
+    let myCommits: Awaited<ReturnType<typeof getOnChainCommitments>>
+    let myCommitCheckFailed = false
+    try { myCommits = await getOnChainCommitments(roundId) }
+    catch { myCommitCheckFailed = true }
 
     // Question titles: local answers cache → GitHub (past rounds are merged) →
     // title embedded in ancillaryData (cross-chain Polymarket requests carry only
@@ -241,7 +250,7 @@ async function fetchRoundResultsUncached(roundId: number, onProgress?: (stage: s
                 c.ancillaryData.toLowerCase() === t.ancillaryData.toLowerCase() && c.time === t.time) ?? false),
         }
     })
-    return { ...base, status: 'ok', requests, fetchedAt: Date.now() }
+    return { ...base, status: 'ok', requests, myCommitCheckFailed, fetchedAt: Date.now() }
 }
 
 export async function renderRoundResults(roundId: number, pre?: RoundResults): Promise<void> {
@@ -292,7 +301,7 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
         row++
         if (t.quorumOk && t.consensusOk) passing++
 
-        let mine = `${DIM}${'–'.padEnd(7)}${RESET}`
+        let mine = `${DIM}${(d.myCommitCheckFailed ? '?' : '–').padEnd(7)}${RESET}`
         if (t.myPrice !== undefined) {
             mine = t.myPrice === t.leadingPrice
                 ? `${GREEN}${('✓' + priceLabel(t.myPrice)).padEnd(7)}${RESET}`
@@ -329,6 +338,7 @@ export async function renderRoundResults(roundId: number, pre?: RoundResults): P
         console.log(`${DIM}Earnings: UMA earned/lost through slashing (UMA subgraph) · pending = trackers not settled yet · rolled = settles in a later round · - = unknown (no signing key).${RESET}`)
     }
     console.log(`${DIM}Quorum/Consensus: progress toward the threshold (revealed/required · leading-outcome/required), capped at 100%.${RESET}`)
-    console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · – = no vote${RESET}`)
+    console.log(`${DIM}Mine: ✓ = matches current majority · ✗ = differs · cmtd = committed but not revealed · ? = couldn't check (RPC) · – = no vote${RESET}`)
+    if (d.myCommitCheckFailed) console.log(`⚠️  Couldn't verify your commitments on-chain (RPC error) — "?" rows are UNKNOWN, not "no vote". Retry to confirm; reveal reads your local round file regardless.`)
     if (!d.myAddress) console.log(`⚠️  Your votes can't be marked — no EXPECTED_VOTER and no .signing-key.json (run \`nub run init\` or \`nub run verify-key\`).`)
 }

@@ -20,6 +20,7 @@ export type ReviewRow = {
     ancillaryData: `0x${string}`
     answer: string              // planned answer; '' = unanswered (skipped on commit)
     sourceAnswer?: string       // as delivered by the answers source, for reference
+    divergedFrom?: string       // your earlier choice that a newer source superseded (3-way merge)
     onchainPrice?: bigint       // your current on-chain commitment, if any
 }
 
@@ -107,7 +108,7 @@ const ancillaryText = (ancillaryData: `0x${string}`): string | undefined => {
 // same thing everywhere (plain ←/→ is always prev/next question). `active`
 // (default true) hides the review without unmounting it — render null, input
 // isActive-gated off — so edited answers survive a round trip to a past round.
-export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, active = true }: { opts: ReviewOpts; onDone: (outcome: ReviewOutcome) => void; onRoundNav?: (delta: 1 | -1) => void; onAbout?: () => void; onReload?: (rows: ReviewRow[]) => void; active?: boolean }) {
+export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWallet, active = true }: { opts: ReviewOpts; onDone: (outcome: ReviewOutcome) => void; onRoundNav?: (delta: 1 | -1) => void; onAbout?: () => void; onReload?: (rows: ReviewRow[]) => void; onWallet?: () => void; active?: boolean }) {
     const [rows] = useState(() => opts.rows.map(r => ({ ...r })))
     const [cursor, setCursor] = useState(0)
     const [top, setTop] = useState(0)
@@ -165,6 +166,9 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, acti
     }
     const sendCount = rows.filter(willSend).length
     const unansweredRows = rows.filter(unanswered)
+    // Rows where a newer source superseded your earlier choice (3-way merge) —
+    // the current answer is the source's; divergedFrom is what you had.
+    const divergedRows = rows.filter(r => r.divergedFrom !== undefined)
     // Trust warnings from the answers source stay visible in the list and the
     // confirm modal — the log panel they originally printed to is covered by
     // this review. `p` shows the full source report.
@@ -227,6 +231,9 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, acti
         // i = about (embedded app only) — reachable from the list and the
         // subviews; the custom input and the modals never call switchView
         if (input === 'i' && onAbout) { onAbout(); return true }
+        // w = wallet/signer setup (embedded app only) — free key here; the
+        // review owns s/c (summary/comments), so wallet can't reuse those
+        if (input === 'w' && onWallet) { onWallet(); return true }
         return false
     }
 
@@ -335,6 +342,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, acti
                     ? <Text color={answerColor(priceLabel(row.onchainPrice))}>{priceLabel(row.onchainPrice)}</Text>
                     : <Text dimColor>{opts.diffAvailable ? 'not committed' : 'unknown (diff unavailable)'}</Text>}</Text>
                 <Text>planned:     <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED — will be skipped'}</Text>{p !== undefined ? <Text dimColor>  (price {p.toString()})</Text> : null}</Text>
+                {row.divergedFrom !== undefined && <Text color="magenta">⟳ upstream:   changed since your last review — your earlier choice was {row.divergedFrom || '(blank)'} (re-enter it to override)</Text>}
                 <Text> </Text>
                 <Text dimColor>←→ prev/next question{roundHint} · 1-4 v answer · s summary · a AI · c comments · esc/d back</Text>
             </Box>
@@ -484,6 +492,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, acti
             {/* Rollover before the source published: no answer landed for any
                 request — point the user at r to re-pull instead of answering 17 by hand */}
             {onReload && rows.every(r => !r.sourceAnswer) && <Text color="yellow" wrap="wrap"> No answers from the source yet — press <Text bold>r</Text> to re-pull from the addon.</Text>}
+            {divergedRows.length > 0 && <Text color="magenta" wrap="wrap"> ⟳ {divergedRows.length} answer(s) changed upstream since your last review — your earlier pick is shown per row and in details (d).</Text>}
             <Text dimColor> {top > 0 ? `▲ ${top} more` : '─'.repeat(10)}</Text>
             {slice.map((x, i) => {
                 const idx = top + i
@@ -502,13 +511,14 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, acti
                             : sends
                                 ? <Text dimColor> was {x.onchainPrice !== undefined ? priceLabel(x.onchainPrice) : '—'}</Text>
                                 : <Text dimColor> ✓</Text>}
+                        {x.divergedFrom !== undefined && <Text color="magenta"> ⟳ was {x.divergedFrom || '(blank)'}</Text>}
                     </Text>
                 )
             })}
             <Text dimColor> {top + WINDOW < rows.length ? `▼ ${rows.length - top - WINDOW} more` : '─'.repeat(10)}</Text>
             <Text> </Text>
             <Legend />
-            <Text dimColor> ↑↓/←→/pg move{roundHint} · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onReload ? ' · r reload' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
+            <Text dimColor> ↑↓/←→/pg move{roundHint} · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onReload ? ' · r reload' : ''}{onWallet ? ' · w wallet' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
         </Box>
     )
 }

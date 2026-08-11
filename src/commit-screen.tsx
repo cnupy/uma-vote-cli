@@ -46,7 +46,7 @@ const toLines = (text: string, color?: string): Line[] =>
 // capped: the app can live for days — an unbounded log grows forever
 const appendLines = (prev: Line[], add: Line[]): Line[] => [...prev, ...add].slice(-200)
 
-export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { onExit: () => void; active?: boolean; onRoundNav?: (delta: -1 | 1) => void; onAbout?: () => void }) {
+export function CommitScreen({ onExit, active = true, onRoundNav, onAbout, onWallet }: { onExit: () => void; active?: boolean; onRoundNav?: (delta: -1 | 1) => void; onAbout?: () => void; onWallet?: () => void }) {
     const [lines, setLines] = useState<Line[]>([])
     const [review, setReview] = useState<Review | undefined>()
     const reviewRef = useRef<Review | undefined>(undefined)
@@ -162,6 +162,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
         // i = about, from the log/done panel only — never while a prompt is
         // typing (handled above) or the review owns the keys
         if (input === 'i' && onAbout) { onAbout(); return }
+        if (input === 'w' && onWallet) { onWallet(); return }
         if (running) return   // the flow is busy — swallow everything else
         // done or error: enter restarts the flow (an aborted review reopens
         // with its saved answers); q/esc leaves (with votes as the app root
@@ -173,7 +174,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout }: { o
     // The review stays mounted while hidden (active=false renders null inside)
     // so its edited answers survive a round trip to a past round and back
     if (review) return (
-        <CommitReview opts={review.opts} active={active} onRoundNav={onRoundNav} onAbout={onAbout} onDone={outcome => {
+        <CommitReview opts={review.opts} active={active} onRoundNav={onRoundNav} onAbout={onAbout} onWallet={onWallet} onDone={outcome => {
             abortedRef.current = !outcome.confirmed
             const r = review
             setReview(undefined)

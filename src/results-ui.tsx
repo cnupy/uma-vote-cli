@@ -26,14 +26,16 @@ const fullPriceLabel = (p: bigint): string => KNOWN_PRICES.includes(p) ? priceLa
 const priceColor = (p: bigint): string =>
     p === P1_VALUE ? 'red' : p === P2_VALUE ? 'green' : p === P3_VALUE ? 'yellow' : p === P4_VALUE ? 'magenta' : 'cyan'
 
-// Same semantics as the static table's Mine column
-const mineMarker = (t: RequestResult): { label: string; color?: string; dim?: boolean } => {
+// Same semantics as the static table's Mine column. checkFailed = the
+// commitment sweep threw (RPC), so an unrevealed row is "unknown" (?), not "–".
+const mineMarker = (t: RequestResult, checkFailed?: boolean): { label: string; color?: string; dim?: boolean } => {
     if (t.myPrice !== undefined) {
         return t.myPrice === t.leadingPrice
             ? { label: `✓${priceLabel(t.myPrice)}`, color: 'green' }
             : { label: `✗${priceLabel(t.myPrice)}`, color: 'red' }
     }
     if (t.myCommitted) return { label: 'cmtd', color: 'gray' }
+    if (checkFailed) return { label: '?', dim: true }
     return { label: '–', dim: true }
 }
 
@@ -245,11 +247,12 @@ export function ResultsExplorer({ opts, onExit, round: roundProp, onRoundChange,
         <Box flexDirection="column">
             <Text bold> Round {round} — {phaseCtx} · {rows.length} request(s) · {passing} passing{slashStats && slashStats.matched > 0 ? <> · your net: <Text color={slashStats.net < 0 ? 'red' : 'green'}>{(slashStats.net > 0 ? '+' : '') + slashStats.net.toFixed(3)} UMA</Text>{slashStats.pending > 0 ? <Text dimColor> · {slashStats.pending} pending</Text> : null}</> : null}{live && revealedPct ? <> · <Text color="cyan">{revealedPct}</Text> of stake revealed</> : null}{live ? (paused ? <Text color="yellow"> · paused</Text> : ' · live') : ''}{freshness ? <Text dimColor>  {freshness}{refreshTag}</Text> : null}</Text>
             {data && !data.myAddress && <Text color="yellow"> ⚠ your votes can't be marked — no EXPECTED_VOTER and no .signing-key.json (run `nub run init` or `nub run verify-key`)</Text>}
+            {data && data.myCommitCheckFailed && <Text color="yellow"> ⚠ couldn't verify your commitments on-chain (RPC) — "?" rows are UNKNOWN, not "no vote"; press r to retry (reveal reads your local round file regardless)</Text>}
         </Box>
     )
 
     if (view === 'detail' && row && data) {
-        const m = mineMarker(row)
+        const m = mineMarker(row, data.myCommitCheckFailed)
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
@@ -258,6 +261,7 @@ export function ResultsExplorer({ opts, onExit, round: roundProp, onRoundChange,
                 <Text>my vote:    {row.myPrice !== undefined
                     ? <Text color={m.color}>{fullPriceLabel(row.myPrice)} {row.myPrice === row.leadingPrice ? '✓ matches current majority' : '✗ differs from current majority'}</Text>
                     : row.myCommitted ? <Text color="gray">committed, not (yet) revealed</Text>
+                    : data.myCommitCheckFailed ? <Text color="yellow">couldn't check on-chain (RPC error) — retry; reveal reads your local round file regardless</Text>
                     : data.myAddress ? <Text dimColor>none</Text>
                     : <Text color="yellow">unknown — no EXPECTED_VOTER and no .signing-key.json (run `nub run init` or `nub run verify-key`)</Text>}</Text>
                 {isPast && (!row.quorumOk || !row.consensusOk)
@@ -304,7 +308,7 @@ export function ResultsExplorer({ opts, onExit, round: roundProp, onRoundChange,
                 {slice.map((t, i) => {
                     const idx = topSafe + i
                     const isCur = idx === cur
-                    const m = mineMarker(t)
+                    const m = mineMarker(t, data!.myCommitCheckFailed)
                     return (
                         <Text key={idx} inverse={isCur} wrap="truncate-end">
                             {isCur ? ' › ' : '   '}
@@ -330,7 +334,7 @@ export function ResultsExplorer({ opts, onExit, round: roundProp, onRoundChange,
                 <Text dimColor> {topSafe + WINDOW < rows.length ? `▼ ${rows.length - topSafe - WINDOW} more` : '─'.repeat(10)}</Text>
             </>}
             <Text> </Text>
-            <Text dimColor> Mine: <Text color="green">✓ matches majority</Text> · <Text color="red">✗ differs</Text> · <Text color="gray">cmtd committed, not revealed</Text> · – no vote</Text>
+            <Text dimColor> Mine: <Text color="green">✓ matches majority</Text> · <Text color="red">✗ differs</Text> · <Text color="gray">cmtd committed, not revealed</Text> · ? couldn't check · – no vote</Text>
             <Text dimColor> ↑↓/pg move · d/enter details · [ ]/ctrl+←→ round · r refetch{live ? ` · p ${paused ? 'resume' : 'pause'}` : ''} · q quit</Text>
             {extraHint && <Text dimColor> {extraHint}</Text>}
         </Box>

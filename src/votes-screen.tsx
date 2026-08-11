@@ -64,7 +64,7 @@ export function VotesScreen({ opts, onExit, onAction, active = true }: { opts: E
         <>
             {/* keyed by round: a rollover retires the old round's parked flow
                 and a fresh commit flow starts for the new round */}
-            {commitMounted && <CommitScreen key={opts.currentRound} active={active && mode === 'commit'} onExit={onExit} onRoundNav={delta => gotoRound(round + delta)} onAbout={() => onAction('about')} />}
+            {commitMounted && <CommitScreen key={opts.currentRound} active={active && mode === 'commit'} onExit={onExit} onRoundNav={delta => gotoRound(round + delta)} onAbout={() => onAction('about')} onWallet={() => onAction('wallet')} />}
             {mode === 'results' && <ResultsExplorer active={active} opts={opts} round={round} onRoundChange={gotoRound} onExit={onExit} extraHint="s stake · u unstake · c claim · w wallet · R reveal · i about · q quit" />}
         </>
     )
