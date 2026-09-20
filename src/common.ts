@@ -520,6 +520,9 @@ export async function ensureFreshFees(
     return { maxFeePerGas: fresh.maxFeePerGas, maxPriorityFeePerGas: fresh.maxPriorityFeePerGas }
 }
 
+// Headroom over the node's gas estimate for vote multicalls — see send() below.
+const GAS_BUFFER_PCT = Number(process.env.GAS_BUFFER_PCT ?? 125)
+
 export async function sendMulticallBatched(
     datas: `0x${string}`[],
     account: `0x${string}`,
@@ -542,9 +545,22 @@ export async function sendMulticallBatched(
     fees = await ensureFreshFees(fees, out)
     const wallet = await getWallet()
     const send = async (batch: `0x${string}`[]): Promise<`0x${string}`> => {
+        // Estimate explicitly and pad. eth_estimateGas binary-searches for the
+        // MINIMUM limit that succeeds, and viem would send exactly that — but
+        // a multicall delegatecalls each sub-call, and every nested frame only
+        // gets 63/64 of what's left, so that minimum sits ~2% above the gas
+        // actually burned. Land a hair under it and the LAST sub-call starves
+        // while thousands of gas sit unused. Meanwhile other voters commit into
+        // the same shared round/tracker state every few blocks, so the real
+        // requirement drifts upward during the (hardware-wallet) confirm.
+        // Unused gas is never charged — only the upfront reserve grows.
+        // (Round 10358 died on a 0.15% shortfall: sent 1,821,673, needed 1,824,495.)
+        const data = encodeFunctionData({ abi: votingContract.abi, functionName: 'multicall', args: [batch] })
+        const estimate = await publicClient.estimateGas({ account, to: votingContract.address, data })
+        const gas = (estimate * BigInt(GAS_BUFFER_PCT)) / 100n
         const txHash = await wallet.client.writeContract({
             ...votingContract, functionName: 'multicall', args: [batch],
-            account: wallet.account, chain: wallet.client.chain, ...fees,
+            account: wallet.account, chain: wallet.client.chain, gas, ...fees,
         })
         recordSentTx(txHash)
         say(`Sent: https://etherscan.io/tx/${txHash}`)
