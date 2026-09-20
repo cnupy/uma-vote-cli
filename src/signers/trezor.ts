@@ -9,6 +9,15 @@ export const DEFAULT_TREZOR_PATH = "m/44'/60'/0'/0/0"
 
 const hex0x = (s: string): `0x${string}` => (s.startsWith('0x') ? s : `0x${s}`) as `0x${string}`
 
+// TrezorConnect is a process-wide singleton: init() throws "already
+// initialized" on a second call and every on() adds another listener. connect()
+// legitimately runs more than once per process though — the init wizard tests a
+// fresh connect per attempt (src/init.ts), and the uma app embeds it as the `w`
+// wallet screen while the signing singleton lives on — so set up once and let
+// later connects reuse it (the derivation path is per-call, not per-init). A
+// failed setup is not cached, so the wizard's retry can try again.
+let setup: Promise<void> | undefined
+
 // Direct Trezor signing over Trezor Bridge or USB. Close Trezor Suite while
 // this runs — Suite holds the device session and causes connect loops.
 export async function connect(): Promise<Wallet> {
@@ -18,20 +27,27 @@ export async function connect(): Promise<Wallet> {
     const TrezorConnect = (trz.default as unknown as { default?: typeof trz.default }).default ?? trz.default
     const { UI, UI_EVENT } = trz
 
-    // Older devices enter PIN/passphrase on the host; newer ones on the device
-    TrezorConnect.on(UI_EVENT, event => {
-        if (event.type === UI.REQUEST_PIN) {
-            void ask('Trezor PIN (keypad positions as shown on the device, 1-9)').then(pin =>
-                TrezorConnect.uiResponse({ type: UI.RECEIVE_PIN, payload: pin }))
-        } else if (event.type === UI.REQUEST_PASSPHRASE) {
-            void ask('Trezor passphrase (Enter for standard wallet)').then(value =>
-                TrezorConnect.uiResponse({ type: UI.RECEIVE_PASSPHRASE, payload: { value, save: true } }))
-        }
+    // Assigned before the first await, so concurrent connects share one setup.
+    setup ??= (async () => {
+        // Older devices enter PIN/passphrase on the host; newer ones on the device
+        TrezorConnect.on(UI_EVENT, event => {
+            if (event.type === UI.REQUEST_PIN) {
+                void ask('Trezor PIN (keypad positions as shown on the device, 1-9)').then(pin =>
+                    TrezorConnect.uiResponse({ type: UI.RECEIVE_PIN, payload: pin }))
+            } else if (event.type === UI.REQUEST_PASSPHRASE) {
+                void ask('Trezor passphrase (Enter for standard wallet)').then(value =>
+                    TrezorConnect.uiResponse({ type: UI.RECEIVE_PASSPHRASE, payload: { value, save: true } }))
+            }
+        })
+        await TrezorConnect.init({
+            manifest: { appName: 'uma-vote-cli', email: 'noreply@uma-vote-cli.invalid', appUrl: 'https://github.com/cnupy/uma-vote-cli' },
+            transports: ['BridgeTransport', 'NodeUsbTransport'],
+        })
+    })().catch(e => {
+        setup = undefined // don't cache a failed setup — the wizard retries
+        throw e
     })
-    await TrezorConnect.init({
-        manifest: { appName: 'uma-vote-cli', email: 'noreply@uma-vote-cli.invalid', appUrl: 'https://github.com/cnupy/uma-vote-cli' },
-        transports: ['BridgeTransport', 'NodeUsbTransport'],
-    })
+    await setup
     // (payload is a success/error union TS doesn't narrow — hence the casts)
     const failure = (payload: unknown) => (payload as { error: string }).error
 
