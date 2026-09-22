@@ -95,7 +95,10 @@ export function encodePrice(answer: string, decodedIdentifier: string): bigint |
         if (a === 'p2') return P2_VALUE
         if (a === 'p3') return P3_VALUE
         if (a === 'p4') return P4_VALUE
-    } else if (decodedIdentifier === 'ACROSS-V2' || decodedIdentifier === 'ASSERT_TRUTH' || decodedIdentifier === 'Admin') {
+        // ASSERT_TRUTH2 (UMIP-191) replaced the retired ASSERT_TRUTH (UMIP-170) as OOv3's
+        // default identifier in Dec 2025, with the same 1e18 = true / 0 = false settlement;
+        // the voter dApp offers exactly those two options for both.
+    } else if (decodedIdentifier === 'ACROSS-V2' || decodedIdentifier === 'ASSERT_TRUTH' || decodedIdentifier === 'ASSERT_TRUTH2' || decodedIdentifier === 'Admin') {
         if (YES_ANSWERS.includes(a)) return 1_000000000000000000n
         if (NO_ANSWERS.includes(a)) return 0n
     }
