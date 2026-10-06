@@ -7,7 +7,7 @@
 //
 // Usage: nub run questions [--q <title substring>] [--round N]
 //        [--include-comments] [--include-ai-summary] [--json]
-import { getCurrentRoundId, getPendingRequests, getAnswers, decodeIdentifier, titleFromAncillary, titleFromText, argValue, handleHelp, sanitizeText, type Answer } from './common'
+import { getCurrentRoundId, getPendingRequests, getAnswers, decodeIdentifier, titleFromAncillary, titleFromText, isPlaceholderTitle, argValue, handleHelp, sanitizeText, type Answer } from './common'
 
 handleHelp(`Usage: nub run questions [options]
 Per-vote briefs for a round: title + binding resolution text.
@@ -64,14 +64,23 @@ if (answers.length > 0) {
         console.error(`No answers file and no pending requests for round ${roundId} — nothing to list.`)
         process.exit(1)
     }
-    votes = []
-    await mapLimit(active, 5, async r => {
-        const title = titleFromAncillary(r.ancillaryData)
-            ?? (text => text ? titleFromText(text) : undefined)(await resolveAncillaryText(r.identifier, r.time, r.ancillaryData))
-        votes.push({ title: title ?? 'N/A', identifier: r.identifier, identifierDecoded: decodeIdentifier(r.identifier), time: r.time, ancillaryData: r.ancillaryData })
-    })
+    votes = active.map(r => ({
+        title: titleFromAncillary(r.ancillaryData) ?? 'N/A',
+        identifier: r.identifier, identifierDecoded: decodeIdentifier(r.identifier),
+        time: r.time, ancillaryData: r.ancillaryData,
+    }))
     votes.sort((a, b) => Number(a.time - b.time))
 }
+
+// Titles the ancillary data didn't carry, and placeholders a saved answers file
+// carried over from an earlier review, resolve through the dApp here. Worth the
+// round trip even for --json: the title is what binds this vote to its Discord
+// thread and AI summary below.
+await mapLimit(votes.filter(v => isPlaceholderTitle(v.title)), 5, async v => {
+    const text = await resolveAncillaryText(v.identifier, v.time, v.ancillaryData)
+    const title = text ? titleFromText(text) : undefined
+    if (title) v.title = title
+})
 
 const selected = votes.filter(v => !filter || v.title.toLowerCase().includes(filter))
 if (selected.length === 0) {

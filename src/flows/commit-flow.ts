@@ -21,7 +21,7 @@ import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
     getPendingRequests, getVoterFromDelegate, matchAnswer, decodeIdentifier, encodePrice,
     randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, short, computeFees, describeFees, feeWarning,
-    sendMulticallBatched, AbortSend, getAnswers, titleFromAncillary, sanitizeText, type StoredVote, type Answer,
+    sendMulticallBatched, AbortSend, getAnswers, titleFromAncillary, isPlaceholderTitle, sanitizeText, type StoredVote, type Answer,
 } from '../common'
 import type { ReviewOpts, ReviewOutcome } from '../commit-ui'
 import { ensName } from '../ens'
@@ -200,20 +200,23 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         // delivered, so ingestion can't do it). Matching and price encoding
         // ran on the raw values above.
         const question = sanitizeText(answer.question)
+        // A saved file can carry the previous review's placeholder instead of a
+        // title — flag it so the review resolves it like an unmatched request
+        const needsTitle = isPlaceholderTitle(question)
         const answerText = sanitizeText(answer.answer)
         if (answer.skip === true) {
-            planned.push({ ...base, question, answer: '', problem: `SKIPPED    "${question}" — marked skip in answers file` })
+            planned.push({ ...base, question, needsTitle, answer: '', problem: `SKIPPED    "${question}" — marked skip in answers file` })
             continue
         }
         const price = encodePrice(answer.answer, identifierDecoded)
         if (price === undefined) {
             planned.push({
-                ...base, question, answer: answerText,
+                ...base, question, needsTitle, answer: answerText,
                 problem: `NO PRICE   "${question}" — can't encode answer "${answerText}" for identifier ${identifierDecoded}`,
             })
             continue
         }
-        planned.push({ ...base, question, answer: answerText, price })
+        planned.push({ ...base, question, needsTitle, answer: answerText, price })
     }
 
     // Diff against what's already committed on-chain this round (tool or dApp).

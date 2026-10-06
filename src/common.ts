@@ -119,6 +119,15 @@ export const titleFromText = (text: string): string | undefined => {
     return t ? sanitizeText(t) : undefined
 }
 
+// The review falls back to `IDENT @ time` when no title resolves, and that
+// placeholder is persisted into answers/<round>.local.json on confirm — so a
+// title read back from an answers file is not necessarily a title. Callers
+// treat these as unresolved and give the lazy resolver another go, which
+// matters beyond cosmetics: the dApp keys Discord threads and AI summaries by
+// title, so a stuck placeholder costs the voter the whole discussion.
+export const isPlaceholderTitle = (title: string | undefined): boolean =>
+    !title || title === 'N/A' || /^[A-Za-z0-9_-]+ @ \d+$/.test(title.trim())
+
 // Human-readable title embedded in ancillaryData, when present (cross-chain
 // Polymarket requests carry only a hash; direct mainnet requests often include text)
 export function titleFromAncillary(ancillaryData: `0x${string}`): string | undefined {
