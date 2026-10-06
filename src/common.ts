@@ -627,9 +627,13 @@ export function logErrorToFile(e: unknown): string {
     return file
 }
 
-const friendly = (e: unknown) => {
+const shortLine = (e: unknown) => {
     const err = e as Error & { shortMessage?: string }
-    const msg = err?.shortMessage ?? (err?.message ?? String(e)).split('\n')[0]
+    return err?.shortMessage ?? (err?.message ?? String(e)).split('\n')[0]
+}
+
+const friendly = (e: unknown) => {
+    const msg = shortLine(e)
     if (/reject|declin|denied/i.test(msg)) {
         console.error(`\n🚫 Rejected on the wallet — nothing was sent.`)
     } else {
@@ -639,8 +643,33 @@ const friendly = (e: unknown) => {
     }
     process.exit(1)
 }
+
+// A rejection nobody awaited is not automatically fatal to a long-running app.
+// trezor-connect, for one, acquires the device from its own background events:
+// when a competing app (Trezor Suite) steals the session mid-acquire, the
+// resulting "wrong previous session" rejects a promise no flow is holding —
+// exiting there drops a live commit/reveal with a bare stack trace. The
+// full-screen app installs a presenter to show those inline instead; one-shot
+// CLI commands install none and keep exiting, so scripts still fail loudly.
+let presentBackgroundError: ((line: string, logFile?: string) => void) | undefined
+export function setBackgroundErrorPresenter(fn?: (line: string, logFile?: string) => void) {
+    presentBackgroundError = fn
+}
+
 process.on('uncaughtException', friendly)
-process.on('unhandledRejection', friendly)
+process.on('unhandledRejection', e => {
+    if (!presentBackgroundError) return friendly(e)
+    const msg = shortLine(e)
+    const rejected = /reject|declin|denied/i.test(msg)
+    try {
+        presentBackgroundError(
+            rejected ? '🚫 Rejected on the wallet — nothing was sent.' : `❌ ${msg}`,
+            rejected ? undefined : path.relative(process.cwd(), logErrorToFile(e)),
+        )
+    } catch {
+        friendly(e)   // presenter itself is broken — fall back to the exit path
+    }
+})
 
 // ---------- misc ----------
 

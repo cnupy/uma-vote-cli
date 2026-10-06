@@ -11,7 +11,7 @@ import path from 'node:path'
 import React, { useEffect, useRef, useState } from 'react'
 import { render, Box, Text, useInput, useApp } from 'ink'
 import { formatUnits, parseUnits, getAddress } from 'viem'
-import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, recordSentTx, startPerfDrain, type FeeInfo } from './common'
+import { publicClient, getWallet, computeFees, describeFees, feeWarning, fmtCountdown, getCurrentRoundId, getVotePhase, derivedRoundId, derivedPhase, phaseEndsAt, logErrorToFile, sanitizeText, recordSentTx, setBackgroundErrorPresenter, startPerfDrain, type FeeInfo } from './common'
 import { setPromptBridge } from './signers/prompt'
 import { SPINNER, maskBuf, linkifyUrls } from './tui'
 import { type ExplorerOpts } from './results-ui'
@@ -382,6 +382,24 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
     const [exiting, setExiting] = useState(false)
     useEffect(() => { if (exiting) exit() }, [exiting, exit])
 
+    // Failures from promises no flow is awaiting (see setBackgroundErrorPresenter):
+    // a hardware wallet whose session a competing app steals rejects inside the
+    // signer library's own event handling, which used to exit the process and
+    // drop the round. Render them as a banner instead — the screens keep showing
+    // their own awaited errors, which stay put and offer the retry.
+    const [bgError, setBgError] = useState<{ text: string; logFile?: string } | undefined>()
+    useEffect(() => {
+        setBackgroundErrorPresenter((text, logFile) => setBgError({ text: sanitizeText(text), logFile }))
+        return () => setBackgroundErrorPresenter(undefined)
+    }, [])
+    // Self-clearing: a one-off device blip shouldn't pin a red line for the rest
+    // of the round. Re-armed by each new banner, so repeats stay visible.
+    useEffect(() => {
+        if (!bgError) return
+        const t = setTimeout(() => setBgError(undefined), 60_000)
+        return () => clearTimeout(t)
+    }, [bgError])
+
     const fetchOpts = () => {
         if (optsLoading.current) return
         optsLoading.current = true
@@ -417,6 +435,7 @@ export function UmaApp({ voter }: { voter: `0x${string}` }) {
 
     return (
         <>
+            {bgError && <Text color="red" wrap="wrap"> {bgError.text}{bgError.logFile ? <Text dimColor> · {bgError.logFile}</Text> : null}</Text>}
             <StakingOverlay voter={voter} active={screen === 'action'} header={screen !== 'wallet'} pendingAction={pendingAction} refreshTick={refreshTick}
                 onDone={() => { setPendingAction(undefined); setScreen('votes') }} />
             {screen === 'reveal' && <RevealScreen onExit={() => setScreen('votes')} />}
@@ -451,6 +470,9 @@ export async function runUmaDashboard(voter: `0x${string}`): Promise<void> {
         await app.waitUntilExit()
     } finally {
         setPromptBridge(undefined)
+        // Likewise the background-error presenter: a rejection arriving after
+        // the app is gone must reach the console/exit path, not a dead banner.
+        setBackgroundErrorPresenter(undefined)
         // UmaApp blanks its tree before exiting, so Ink persists an empty frame
         // (app.clear() here would be a no-op — unmount already zeroed the line
         // count). Drain stdout so uma.ts's process.exit(0) can't truncate that
