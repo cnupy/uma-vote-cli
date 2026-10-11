@@ -34,6 +34,13 @@ export const urlLabel = (url: string, max = 34): string => {
 export const linkifyUrls = (text: string): string =>
     text.replace(URL_RE, u => hyperlink(u, urlLabel(u)))
 
+// Warning lines pinned above a list, capped so the Ink frame stays shorter
+// than the terminal (a taller frame tears on redraw): the first `max` lines
+// and how many more the full report (p) holds.
+export const PINNED_WARNINGS = 4
+export const pinnedWarnings = (lines: string[], max = PINNED_WARNINGS): { shown: string[]; more: number } =>
+    lines.length <= max ? { shown: lines, more: 0 } : { shown: lines.slice(0, max), more: lines.length - max }
+
 // App-wide round-navigation chord: [ ]/ctrl+←→ = prev/next round. Returns 0
 // when the input is not a round-nav key.
 export const roundNavDelta = (input: string, key: { ctrl: boolean; leftArrow: boolean; rightArrow: boolean }): -1 | 0 | 1 =>

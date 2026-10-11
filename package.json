@@ -15,7 +15,8 @@
     "uma": "nub src/uma.ts",
     "questions": "nub src/questions.ts",
     "verify-key": "nub src/verify-key.ts",
-    "addon": "nub src/run-addon.ts"
+    "addon": "nub src/run-addon.ts",
+    "test": "nub src/answers.test.ts && nub src/discord.test.ts"
   },
   "dependencies": {
     "@ledgerhq/hw-app-eth": "^7.8.8",

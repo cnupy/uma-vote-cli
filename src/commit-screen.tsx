@@ -182,7 +182,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout, onWal
         }} onReload={rows => {
             // Wind the flow down as an aborted review (persists these rows to
             // .local.json), then the flow's then-handler restarts with refetch —
-            // the fresh addon answers overlay these just-saved edits.
+            // every addon is asked again and these just-saved edits stay on top.
             reloadRef.current = true
             refetchNextRef.current = true
             abortedRef.current = true   // suppress the wind-down frame, like a normal abort

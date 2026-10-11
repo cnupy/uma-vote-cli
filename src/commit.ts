@@ -6,7 +6,7 @@ import { runCommitFlow } from './flows/commit-flow'
 handleHelp(`Usage: nub run commit [options]
 Commit votes for the current round (interactive review on a terminal).
   --dry-run         simulate and print the multicall calldata, send nothing
-  --force           skip verification/diff aborts, re-send everything
+  --force           skip the verification and diff aborts; re-send matching commitments too (differing ones stay; see README)
   --yes             skip the review/confirmation (non-interactive table flow)
   --max-fee <gwei>  max fee override (or MAX_FEE_GWEI)
   --tip <gwei>      priority fee override (or PRIORITY_FEE_GWEI)

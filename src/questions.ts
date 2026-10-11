@@ -32,7 +32,7 @@ const wantAi = asJson || process.argv.includes('--include-ai-summary')
 const encodeIdentifier = (name: string): `0x${string}` =>
     `0x${Buffer.from(name, 'utf8').toString('hex').padEnd(64, '0')}` as `0x${string}`
 
-// Titles: answers file when available (exact committee wording), else the
+// Titles: answers file when available (the source's own wording), else the
 // usual resolution chain (embedded ancillary text → .cache/ancillary → dApp
 // resolver). Timestamps/identifiers come from pending requests when the round
 // is live, from the answers file otherwise.

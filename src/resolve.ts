@@ -28,7 +28,7 @@ export async function resolveAncillaryText(
     if (existsSync(file)) return sanitizeText(readFileSync(file, 'utf8'))
     const params = new URLSearchParams({ identifier, time: time.toString(), ancillaryData })
     try {
-        const res = await fetch(`${DAPP_URL}/api/resolve-l2-ancillary-data?${params}`)
+        const res = await fetch(`${DAPP_URL}/api/resolve-l2-ancillary-data?${params}`, { signal: AbortSignal.timeout(15_000) })
         if (!res.ok) return undefined
         const { resolvedAncillaryData } = await res.json() as { resolvedAncillaryData?: `0x${string}` }
         // The endpoint echoes the input back when it can't resolve
@@ -60,7 +60,7 @@ export async function fetchAiSummary(
 ): Promise<OutcomeSummary[] | undefined> {
     const params = new URLSearchParams({ time: time.toString(), identifier: identifierDecoded, title: dappTitle(title) })
     try {
-        const res = await fetch(`${DAPP_URL}/api/fetch-summary?${params}`)
+        const res = await fetch(`${DAPP_URL}/api/fetch-summary?${params}`, { signal: AbortSignal.timeout(15_000) })
         if (!res.ok) return undefined
         const j = await res.json() as { summary?: Record<string, { summary?: string; sources?: [string, number][] }> }
         if (!j.summary) return undefined

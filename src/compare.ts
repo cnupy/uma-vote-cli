@@ -5,7 +5,8 @@
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { ROOT, EXPECTED_VOTER } from './config'
-import { getEncryptedVoteEvents, decodeIdentifier, encodePrice, P1_VALUE, P2_VALUE, P3_VALUE, type Answer } from './common'
+import { formatUnits } from 'viem'
+import { getEncryptedVoteEvents, decodeIdentifier, encodePrice, describePrice, pricePrecision, P1_VALUE, P2_VALUE, P3_VALUE, P4_VALUE, UNRESOLVABLE_VALUE, type Answer } from './common'
 import { decryptVote } from './crypto'
 
 export type OnChainCommitment = {
@@ -48,8 +49,23 @@ export function takeCommitment(pool: OnChainCommitment[], ancillaryData: string,
     return idx === -1 ? undefined : pool.splice(idx, 1)[0]
 }
 
-export const priceLabel = (p: bigint) =>
-    p === P1_VALUE ? 'P1/no' : p === P2_VALUE ? 'P2/yes' : p === P3_VALUE ? 'P3' : 'P4'
+// A committed price in words. P1-P3 only mean no/yes/unknown on identifiers
+// that settle that way; on MULTIPLE_VALUES price 0 is the packing [0, ...]
+// and the magic prices are min/max int256, so the identifier decides the
+// label. A custom price shows its value in the identifier's units; without
+// an identifier it shows the raw integer, never a guessed "P4".
+export const priceLabel = (p: bigint, identifierDecoded?: string, labelCount?: number): string => {
+    if (identifierDecoded === 'MULTIPLE_VALUES') {
+        if (p === P4_VALUE) return 'P4'
+        if (p === UNRESOLVABLE_VALUE) return 'unresolvable'
+        return describePrice(p, identifierDecoded, labelCount)!
+    }
+    if (p === P1_VALUE) return 'P1/no'
+    if (p === P2_VALUE) return 'P2/yes'
+    if (p === P3_VALUE) return 'P3'
+    if (p === P4_VALUE) return 'P4'
+    return identifierDecoded ? formatUnits(p, pricePrecision(identifierDecoded)) : p.toString()
+}
 
 // ANSI colors for diff tables
 import { GREEN, RED, DIM, RESET } from './common'
@@ -72,9 +88,10 @@ export function renderAnswersDiff(
             const c = takeCommitment(unclaimed, a.ancillaryData, a.timestamp !== undefined ? BigInt(a.timestamp) : undefined)
             if (!c) { color = DIM; note = '  (you have not committed this one)'; mismatches++ }
             else {
-                const expected = encodePrice(a.answer, decodeIdentifier(c.identifier))
+                const identifierDecoded = decodeIdentifier(c.identifier)
+                const expected = encodePrice(a.answer, identifierDecoded)
                 if (expected !== undefined && expected === c.price) color = GREEN
-                else { color = RED; note = `  (you committed ${priceLabel(c.price)})`; mismatches++ }
+                else { color = RED; note = `  (you committed ${priceLabel(c.price, identifierDecoded)})`; mismatches++ }
             }
         }
         console.log(`${color}  ${String(i + 1).padStart(2)}  ${(a.answer ?? '?').padEnd(6)}  ${(a.question ?? '(no title)').slice(0, 90)}${note}${RESET}`)

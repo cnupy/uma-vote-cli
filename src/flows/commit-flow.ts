@@ -9,36 +9,39 @@
 // exiting, so an embedding app survives. Only the uncaught-error handler still
 // prints directly.
 import path from 'node:path'
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { encodeFunctionData, getAddress } from 'viem'
 import { umaContractAbi } from '../umaAbi'
-import { EXPECTED_VOTER, ANSWERS_FILE, ROOT } from '../config'
+import { EXPECTED_VOTER, ROOT } from '../config'
 import { getSigningKey, deterministicSalt, encryptVote, type SigningKey } from '../crypto'
 import { ask } from '../signers/prompt'
 import { loadAddons } from '../addons'
+import { collectAnswers, answersForGate, lookupVote, roundOverview, rowTitle, reconcile, nextBasis, nextDecided, batchAnswer, blockedInBatch, committedContested, keepsCommitment, rowProblem, voteKey, type Suggestion, type Conflict } from '../answers'
 import { getOnChainCommitments, takeCommitment, priceLabel, GREEN, RED, DIM, RESET } from '../compare'
 import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
-    getPendingRequests, getVoterFromDelegate, matchAnswer, decodeIdentifier, encodePrice,
-    randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, short, computeFees, describeFees, feeWarning,
-    sendMulticallBatched, AbortSend, getAnswers, titleFromAncillary, isPlaceholderTitle, sanitizeText, type StoredVote, type Answer,
+    getPendingRequests, getVoterFromDelegate, decodeIdentifier, encodePrice, describePrice, priceProblem, multipleValuesLabels,
+    randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, computeFees, describeFees, feeWarning,
+    sendMulticallBatched, AbortSend, isPlaceholderTitle, sanitizeText, type StoredVote, type Answer,
 } from '../common'
+import { resolveAncillaryText } from '../resolve'
 import type { ReviewOpts, ReviewOutcome } from '../commit-ui'
 import { ensName } from '../ens'
 import { consoleSink, captureConsole, type OutputSink } from './sink'
 
 export type CommitFlowOpts = {
     dryRun: boolean             // --dry-run: simulate + print calldata, send nothing
-    force: boolean              // --force: skip verification/diff aborts, re-send everything
+    force: boolean              // --force: skip the verification and diff aborts; re-send rows whose commitment already matches (a differing one stays, unless the diff itself failed)
     yes: boolean                // --yes: skip the batch path's y/N confirm
     // On a terminal the full-screen review (adjust answers, inspect details/docs/
     // comments, confirm) replaces the printed table and the y/N prompt. --yes,
     // --dry-run and piped runs keep the non-interactive table.
     interactive: boolean
-    // Force a fresh addon pull, ignoring every saved answers file (the embedded
-    // review's r key): the answers source often publishes mid-commit-phase, so a run
-    // that opened all-unanswered can re-pull without restarting the app. Prior
-    // manual answers still overlay the freshly pulled ones (blanks don't).
+    // Re-ask every addon and make pulling addons pull before using their cache
+    // (the embedded review's r key): a source often publishes mid-commit-phase,
+    // so a run that opened all-unanswered can refresh without restarting the
+    // app. Your saved review still overlays the result, and a source that
+    // returns nothing keeps what you saved.
     refetch?: boolean
     review?: (opts: ReviewOpts) => Promise<ReviewOutcome>  // defaults to commit-ui's reviewVotes (lazy import)
     out?: OutputSink
@@ -82,14 +85,11 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     }
     out.log(`${active.length} votable request(s) this round.`)
 
-    // Answers: ANSWERS_FILE override → local answers/<roundId>.json → addons.
-    // Installed addons then get a pre-commit verification gate and a provenance
-    // report slot (see src/addons.ts). --refetch skips the local files so the
-    // addon pull below runs unconditionally (freshly published answers).
-    let answersResult = opts.refetch ? undefined : await getAnswers(roundId)
-
-    // Nothing local — let addons pull from upstream right here (the verification
-    // gate below still hash-checks whatever they deliver).
+    // Answers: ANSWERS_FILE override, else every installed addon asked and
+    // merged per vote (src/answers.ts). Each addon then gets a pre-commit gate
+    // over the answers it supplied and a provenance report slot (see
+    // src/addons.ts). --refetch (the review's r key) makes every pulling addon
+    // pull again before falling back to its cache.
     // Addon-phase output (pull progress, provenance, trust warnings) is teed
     // into `addonNotices` besides the sink: the log panel is transient and the
     // review covers it, but the review must keep showing the trust warnings.
@@ -103,48 +103,48 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     }
     const teeSink: OutputSink = { log: noticed(out.log), warn: noticed(out.warn), error: noticed(out.error) }
 
-    if (!answersResult) {
-        for (const addon of await captureConsole(out, loadAddons)) {
-            if (!addon.pullAnswers) continue
-            teeSink.log(`${opts.refetch ? `Re-fetching round ${roundId} answers` : `No local answers for round ${roundId} —`} pulling via addon "${addon.name}"...`)
-            try {
-                // captureConsole: addons print progress/provenance with
-                // console.* — inside an Ink app that must land in the sink
-                answersResult = await captureConsole(teeSink, () => addon.pullAnswers!(roundId))
-            } catch (e) {
-                // teed: the review's p view must explain why answers are missing
-                teeSink.error(`⚠ ${addon.name}: pull failed (${(e as Error).message.split('\n')[0]}).`)
-            }
-            if (answersResult) break
-        }
-    }
+    // captureConsole inside: addons print progress/provenance with console.*
+    // — inside an Ink app that must land in the sink. `review` tells each
+    // addon whether a human will see its answers before anything is signed.
+    const answersResult = await collectAnswers(roundId, { pull: true, refetch: opts.refetch, review: interactive, out: teeSink })
+    for (const s of answersResult.sources) teeSink.log(`Answers from ${s.addon}: ${s.answered} of ${s.total} vote(s) answered — ${s.label}`)
+    // A dead or failing source is one plain line, in the log and the review's
+    // banner (⚠), and everything else carries on
+    for (const f of answersResult.failures) teeSink.warn(f)
+    // Counted per request with the same timed/untimed join the rows get below
+    // (lookupVote), so the banner and the rows agree on what a disagreement is
+    const { disagreements, anyAnswer } = roundOverview(answersResult.votes, active.map(r => ({ ancillaryData: r.ancillaryData, timestamp: r.time })), answersResult.saved)
+    if (disagreements.length > 0) teeSink.warn(`⚠ ${disagreements.length} vote(s) where the sources disagree or a source reports a conflict — left for you to decide.`)
 
-    // Still nothing: interactively you can answer every request from scratch
-    // (like the dApp); the batch flow has nothing to work with and aborts.
-    if (!answersResult) {
+    // No source answered anything: interactively you can answer every request
+    // from scratch (like the dApp) or from your saved review; the batch flow
+    // has nothing to work with and aborts.
+    if (!anyAnswer) {
         if (!interactive) {
             out.error(`No answers for round ${roundId}.`)
             out.error(`Provide them via ANSWERS_FILE=<path>, save answers/${roundId}.json, install an answers addon (see README) — or run on a terminal without --yes to answer interactively.`)
             return 1
         }
-        out.log(`No answers source — opening the review with every request unanswered.`)
-        answersResult = { source: '(none — answered interactively)', answers: [] }
+        out.log(`No source answered — opening the review${answersResult.source.includes('saved review') ? ' from your saved review' : ' with every request unanswered'}.`)
     }
-    out.log(`Answers: ${answersResult.source} (${answersResult.answers.length} entries)`)
-    if (ANSWERS_FILE) {
-        out.log(`ANSWERS_FILE override — addon verification still applies.\n`)
+    out.log(`Answers: ${answersResult.source}`)
+    if (answersResult.overrideFile) {
+        out.log(`ANSWERS_FILE override — the only source; your saved review is not read, every addon gate still checks it.\n`)
     }
-    const finalAnswers = answersResult.answers
-    for (const addon of finalAnswers.length > 0 ? await captureConsole(out, loadAddons) : []) {
+    for (const addon of await captureConsole(out, loadAddons)) {
+        // Each gate checks only what its own addon supplied (ANSWERS_FILE goes
+        // through every gate). An addon that supplied nothing has nothing to
+        // verify and no report to give.
+        const own = answersForGate(answersResult, addon.name)
+        if (!own) continue
         if (addon.verifyBeforeCommit) {
             // A failed gate fails closed only when nobody can react: the batch
             // path (--yes/piped/--dry-run) aborts. Interactively the ❌ is teed
             // into the review's warnings banner instead — the human sees the
             // divergence and either re-pulls fresh upstream answers (r) or
-            // reviews the differences deliberately before confirming. Common
-            // benign case: a stale .local.json now that the source published.
+            // reviews the differences deliberately before confirming.
             try {
-                const v = await captureConsole(teeSink, () => addon.verifyBeforeCommit!(roundId, finalAnswers))
+                const v = await captureConsole(teeSink, () => addon.verifyBeforeCommit!(roundId, own))
                 if (v.ok) teeSink.log(`✓ ${addon.name}: ${v.detail}`)
                 else {
                     teeSink.error(`\n❌ ${addon.name}: ${v.detail}`)
@@ -166,57 +166,81 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     }
     out.log('')
 
-    // Match every active request to an answer. Requests without a committable
-    // answer (unmatched / marked skip / unencodable) are kept too: the interactive
-    // review can still answer them, the batch path reports them as problems.
-    const pool = [...answersResult.answers]
+    // Match every active request to its merged vote. Requests without a
+    // committable answer (unknown to every source / disagreed / unencodable)
+    // are kept too: the interactive review can still answer them, the batch
+    // path reports them as problems. The owner's saved review (none under
+    // ANSWERS_FILE) is laid over each row by `reconcile`: a row he decided
+    // stays his, a source that moved since is flagged (sourceChanged), never
+    // applied over him; a row that only held a suggestion follows the sources
+    // and is flagged when the suggestion changed; a source that returns
+    // nothing keeps what he saved. A source that reports a conflict on a vote
+    // leaves it blank like a disagreement, reason shown. A batch run signs
+    // only decided answers and what the sources say now (`batchAnswer`),
+    // never a saved suggestion, and never over a commitment already on chain
+    // that differs, his own decided answer included (`keepsCommitment`,
+    // below).
     type PlannedVote = StoredVote & { priceBig: bigint; saltBig: bigint; timeBig: bigint; changed?: boolean }
     type PlannedRequest = {
         identifier: `0x${string}`; identifierDecoded: string
         time: bigint; ancillaryData: `0x${string}`
         question: string
         needsTitle?: boolean        // placeholder question — the review resolves the real title lazily
-        answer: string              // '' when the source gave nothing usable
+        answer: string              // planned: the owner's decided answer or the sources' agreed one; '' = nothing usable
+        decided: boolean            // the answer is the owner's own (typed or confirmed); false = a suggestion
+        sourceAnswer: string        // the sources' agreed answer as delivered ('' when none or disagreed)
+        suggestions: Suggestion[]   // every source's non-empty answer, with its confidence
+        conflicts: Conflict[]       // sources that found the vote contested, with their reasons
+        disagree: boolean
+        sourceChanged?: { from: string; to: string }
+        suggestionChanged?: { from: string; to: string }
+        basis: string               // persisted with the row (see the save below)
+        labels?: string[]           // MULTIPLE_VALUES: the request's labels, one value each; undefined = count unknown
         price?: bigint              // undefined = not committable as-is
         onchainPrice?: bigint
         problem?: string
     }
     const planned: PlannedRequest[] = []
+    const saved = answersResult.saved
 
     for (const r of active) {
         const identifierDecoded = decodeIdentifier(r.identifier)
         const base = { identifier: r.identifier, identifierDecoded, time: r.time, ancillaryData: r.ancillaryData }
-        const answer = matchAnswer(r, pool)
-        if (!answer) {
-            const title = titleFromAncillary(r.ancillaryData)
-            planned.push({
-                ...base, question: title ?? `${identifierDecoded} @ ${r.time}`, needsTitle: !title, answer: '',
-                problem: `UNMATCHED  ${identifierDecoded} @ ${r.time} — no answer for ancillaryData ${short(r.ancillaryData)}`,
-            })
-            continue
+        const vote = lookupVote(answersResult.votes, { ancillaryData: r.ancillaryData, timestamp: r.time })
+        const s = saved?.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time }))
+        const merged = reconcile(vote, s)
+        const answer = interactive ? merged.answer : batchAnswer(merged, vote)
+        // A MULTIPLE_VALUES vote carries one value per label, and the labels
+        // are in the request's text (resolved via the dApp for cross-chain
+        // requests, cached on disk). Without them the count is unknown and a
+        // value list is refused rather than packed on a guess.
+        let labels: string[] | undefined
+        if (identifierDecoded === 'MULTIPLE_VALUES') {
+            const text = await resolveAncillaryText(r.identifier, r.time, r.ancillaryData).catch(() => undefined)
+            labels = text ? multipleValuesLabels(text) : undefined
         }
-        // Display copies of the answers-file text — sanitized here (post
+        // Display copies of the sources' text — sanitized here (post
         // verification gate: the gate must hash the answers exactly as
-        // delivered, so ingestion can't do it). Matching and price encoding
-        // ran on the raw values above.
-        const question = sanitizeText(answer.question)
+        // delivered, so ingestion can't do it). Price encoding runs on the raw
+        // value. With every source gone the saved review's title still shows.
+        const question = rowTitle(vote, s, r.ancillaryData) || `${identifierDecoded} @ ${r.time}`
         // A saved file can carry the previous review's placeholder instead of a
         // title — flag it so the review resolves it like an unmatched request
         const needsTitle = isPlaceholderTitle(question)
-        const answerText = sanitizeText(answer.answer)
-        if (answer.skip === true) {
-            planned.push({ ...base, question, needsTitle, answer: '', problem: `SKIPPED    "${question}" — marked skip in answers file` })
-            continue
+        const row: PlannedRequest = {
+            ...base, question, needsTitle,
+            answer: sanitizeText(answer), decided: merged.decided, sourceAnswer: sanitizeText(vote?.answer ?? ''),
+            suggestions: (vote?.suggestions ?? []).map(x => ({ addon: sanitizeText(x.addon), answer: sanitizeText(x.answer), confidence: sanitizeText(x.confidence) })),
+            conflicts: (vote?.conflicts ?? []).map(c => ({ addon: sanitizeText(c.addon), reason: sanitizeText(c.reason) })),
+            disagree: vote?.disagree ?? false, sourceChanged: merged.sourceChanged, suggestionChanged: merged.suggestionChanged, basis: merged.basis, labels,
         }
-        const price = encodePrice(answer.answer, identifierDecoded)
-        if (price === undefined) {
-            planned.push({
-                ...base, question, needsTitle, answer: answerText,
-                problem: `NO PRICE   "${question}" — can't encode answer "${answerText}" for identifier ${identifierDecoded}`,
-            })
-            continue
+        row.problem = rowProblem({ ...row, answer, mergedAnswer: sanitizeText(merged.answer), known: !!vote || !!s })
+        if (row.problem === undefined) {
+            const price = encodePrice(answer, identifierDecoded, labels?.length)
+            if (price === undefined) row.problem = `NO PRICE   "${question}" — answer "${row.answer}": ${priceProblem(answer, identifierDecoded, labels?.length)}`
+            else row.price = price
         }
-        planned.push({ ...base, question, needsTitle, answer: answerText, price })
+        planned.push(row)
     }
 
     // Diff against what's already committed on-chain this round (tool or dApp).
@@ -255,72 +279,50 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     let toSend: PlannedVote[]
 
     if (interactive) {
-        // Reopen the review from your last saved state (answers/<round>.local.json),
-        // 3-way merged against the current source. Each saved row also recorded
-        // the source value it was based on (`source` = the basis), so we can tell
-        // an untouched copy from a deliberate override:
-        //   • untouched (saved answer == its basis) → take the CURRENT source, so
-        //     a newer committee commit wins automatically (no stale clobber);
-        //   • override, source unchanged → keep your override;
-        //   • override, source ALSO moved → newer source wins, row flagged as
-        //     diverged (your earlier choice shown so you can re-apply it).
-        // Only overlays when the source isn't the .local.json itself (then the
-        // file already IS the state). The verification gate and batch path keep
-        // working on the source as delivered; sourceAnswer still shows it.
-        type LocalAnswer = Answer & { source?: string }
-        const saved = new Map<string, { answer: string; source?: string }>()
-        const localPath = path.join(ROOT, 'answers', `${roundId}.local.json`)
-        if (!answersResult.source.includes('.local.json') && existsSync(localPath)) {
-            try {
-                for (const a of JSON.parse(readFileSync(localPath, 'utf8')) as LocalAnswer[]) {
-                    saved.set(`${a.ancillaryData}-${a.timestamp ?? ''}`.toLowerCase(), {
-                        answer: sanitizeText(a.answer),
-                        source: a.source === undefined ? undefined : sanitizeText(a.source),
-                    })
-                }
-            } catch { /* unreadable local file — prefill from the source only */ }
-        }
+        // The review opens on the reconciled rows (planned above): the sources'
+        // agreed answer, or your decided answer, with every source's
+        // suggestion and confidence beside it, disagreements left blank, a
+        // moved source and a changed suggestion flagged.
         const reviewed = await review({
             roundId, phaseEnd: phaseEndsAt(), diffAvailable: !!onchain, force,
             notices: addonNotices,
-            rows: planned.map(p => {
-                const current = p.answer   // current source value ('' when the source gave nothing)
-                const s = saved.get(`${p.ancillaryData}-${p.time}`.toLowerCase())
-                let answer = current
-                let divergedFrom: string | undefined
-                if (s) {
-                    // Legacy files predate `source`: with no recorded basis we
-                    // can't prove an override, so treat the row as untouched
-                    // (basis = the saved answer). Current source wins cleanly and
-                    // the file heals to the new format on save.
-                    const basis = s.source === undefined ? s.answer : s.source
-                    if (s.answer === basis) answer = current               // untouched → newer source wins
-                    else if (current === basis) answer = s.answer           // override, source stable → keep it
-                    else { answer = current; divergedFrom = s.answer }      // override + source moved → source wins, flag
-                }
-                return {
-                    question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
-                    time: p.time, ancillaryData: p.ancillaryData,
-                    answer,
-                    sourceAnswer: p.answer || undefined, divergedFrom, onchainPrice: p.onchainPrice,
-                }
-            }),
+            rows: planned.map(p => ({
+                question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
+                time: p.time, ancillaryData: p.ancillaryData,
+                answer: p.answer, decided: p.decided,
+                sourceAnswer: p.sourceAnswer || undefined, sources: p.suggestions, conflicts: p.conflicts.length > 0 ? p.conflicts : undefined, disagree: p.disagree || undefined,
+                sourceChanged: p.sourceChanged, suggestionChanged: p.suggestionChanged, onchainPrice: p.onchainPrice, labels: p.labels,
+            })),
         })
         // Persist the review — confirmed OR aborted — so the next run prefills
         // instead of starting blank. Saved BEFORE sending (a rejected tx or a
         // quit must not lose the selections) and to a separate .local.json — a
-        // pulled answers file is never overwritten and keeps precedence.
+        // pulled answers file is never overwritten. Confirming means pressing
+        // y on the "Commit N vote(s)?" modal, in `nub run commit` and in the
+        // uma app's commit screen alike; the file is written at that moment,
+        // before the wallet is touched.
         toSend = []
         let unanswered = 0
+        type LocalAnswer = Answer & { source?: string; decided?: boolean }
         const answered: LocalAnswer[] = []
+        const prefilled = new Map(planned.map(p => [voteKey({ ancillaryData: p.ancillaryData, timestamp: p.time }), p]))
         for (const r of reviewed.rows) {
-            // Persist every row (blanks included) WITH the source it was based on
-            // (the basis), so next run's 3-way merge can tell an untouched copy
-            // from a deliberate override — a newer source then supersedes the
-            // former but not the latter. A deliberate CLEAR (blank answer) still
-            // survives, since blank != its non-blank basis reads as an override.
-            answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer, source: r.sourceAnswer ?? '' })
-            const price = r.answer ? encodePrice(r.answer, r.identifierDecoded) : undefined
+            // Persist every row (blanks included) WITH the source value it was
+            // judged against (`source` = the basis) and whether it is yours
+            // (`decided`): a row you changed, or any answered row when you
+            // confirmed. A row you left as suggested and did not confirm is
+            // saved as a suggestion: the next review prefills it, a batch run
+            // does not sign it. A row you changed in this review takes the
+            // sources' current agreed value as its basis; a row you left alone
+            // keeps the basis `reconcile` settled on, so a flagged move stays
+            // flagged until you re-enter it. Sources that returned nothing
+            // never blank the basis: the row keeps what was saved. A deliberate
+            // CLEAR (blank answer) is yours too, and survives.
+            const p = prefilled.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time }))
+            const basis = p ? nextBasis({ answer: r.answer, prefilled: p.answer, sourceAnswer: p.sourceAnswer, basis: p.basis }) : ''
+            const decided = p ? nextDecided({ answer: r.answer, prefilled: p.answer, decided: p.decided }, reviewed.confirmed) : r.answer !== ''
+            answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer, source: basis, decided })
+            const price = r.answer ? encodePrice(r.answer, r.identifierDecoded, r.labels?.length) : undefined
             if (price === undefined) { unanswered++; continue }
             // Committing a subset is safe: VotingV2.commitVote overwrites the hash
             // per request, other requests' commitments are untouched.
@@ -332,7 +334,8 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
             writeFileSync(path.join(ROOT, 'answers', `${roundId}.local.json`), JSON.stringify(answered, null, 2))
         }
         if (!reviewed.confirmed) {
-            out.log(`Aborted — nothing sent.${answered.length > 0 ? ' Your answers are saved and will prefill the next review.' : ''}`)
+            const yours = answered.filter(a => a.decided).length
+            out.log(`Aborted — nothing sent.${answered.length > 0 ? ` Saved: ${yours} answer(s) of yours, ${answered.length - yours} suggestion(s) you did not confirm; both prefill the next review, only yours count in a batch run.` : ''}`)
             return 0
         }
         if (unanswered > 0) out.log(`⚠ ${unanswered} unanswered request(s) skipped — no commit for them.`)
@@ -345,8 +348,46 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         }
         out.log(`Round ${roundId}: committing ${toSend.length} vote(s).`)
     } else {
+        // Batch: nobody can pick a side, so a vote the sources disagree on and
+        // you never decided aborts the run outright (--force does not override
+        // this: it skips verification, it does not choose answers). One
+        // exception: a vote you already committed on chain, where nothing
+        // would be sent anyway (below, keepsCommitment); it is left as
+        // committed and listed with the others, and the rest of the run goes
+        // on. Without the on-chain diff it blocks like the rest. A source
+        // that moved after you decided is noted; your decided answer stands. A
+        // suggestion that changed since you last saw it is noted too; the
+        // sources' current answer is what a batch run signs for such a row.
+        const sides = (p: PlannedRequest) => [...p.suggestions.map(x => `${x.addon} ${x.answer} (${x.confidence})`), ...p.conflicts.map(c => `${c.addon} sees a conflict (${c.reason})`)].join(' vs ')
+        const blocked = blockedInBatch(planned)
+        if (blocked.length > 0) {
+            out.error(`\n❌ ${blocked.length} vote(s) where the sources disagree or a source reports a conflict, and you have not decided:`)
+            for (const p of blocked) out.error(`  ${p.question.slice(0, 70)} — ${sides(p)}`)
+            out.error(`Aborting — decide them on a terminal without --yes (the review), or save answers/${roundId}.local.json.`)
+            return 1
+        }
+        const contested = committedContested(planned)
+        for (const p of planned.filter(p => p.sourceChanged)) {
+            out.warn(`⚠ ${p.question.slice(0, 70)}: source moved ${p.sourceChanged!.from || '(blank)'} → ${p.sourceChanged!.to} since you decided; your ${p.answer || '(blank)'} stands.`)
+        }
+        // A commitment already on chain is a choice the owner made, whoever
+        // or whatever made it for him: a batch run never replaces it, not
+        // with a suggestion and not with a decided answer of his either (he
+        // may have recommitted in the dApp after deciding here; this run
+        // cannot tell which he meant). The row is left as committed and the
+        // difference is reported.
+        const kept = planned.filter(keepsCommitment)
+        const whose = (p: PlannedRequest) => p.decided ? `your saved answer is ${p.answer}` : `the sources now say ${p.answer}`
+        for (const p of kept) {
+            out.warn(`⚠ ${p.question.slice(0, 70)}: you committed ${priceLabel(p.onchainPrice!, p.identifierDecoded, p.labels?.length)} on chain and ${whose(p)}; a batch run never replaces your commitment. It stays; change it in the review if you mean to.`)
+            p.price = undefined
+        }
+        for (const p of planned.filter(p => p.suggestionChanged && p.price !== undefined)) {
+            out.warn(`⚠ ${p.question.slice(0, 70)}: the suggestion changed ${p.suggestionChanged!.from} → ${p.suggestionChanged!.to} since you last reviewed it; you never confirmed it, so the sources' current ${p.suggestionChanged!.to} is what this run signs.`)
+        }
         const votes = planned.filter(p => p.price !== undefined)
-        const problems = planned.filter(p => p.problem).map(p => p.problem!)
+        // a contested vote left as committed is listed there, not as a problem
+        const problems = planned.filter(p => p.problem && !contested.includes(p)).map(p => p.problem!)
         if (onchain) {
             out.log(`You already committed ${onchain.commitments.length} vote(s) this round with ${onchain.address} — diffing:\n`)
         }
@@ -356,15 +397,26 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
             if (onchain) {
                 if (v.onchainPrice === undefined) { color = DIM; note = '  (not committed yet)' }
                 else if (v.onchainPrice === v.price) color = GREEN
-                else { color = RED; note = `  (currently committed: ${priceLabel(v.onchainPrice)})` }
+                else { color = RED; note = `  (currently committed: ${priceLabel(v.onchainPrice, v.identifierDecoded, v.labels?.length)})` }
             }
-            out.log(`${color}  ${String(i + 1).padStart(2)}. [${v.answer}] ${v.question}  (${v.identifierDecoded})${note}${RESET}`)
+            // a packed MULTIPLE_VALUES answer shows the values it encodes
+            const meaning = describePrice(v.price!, v.identifierDecoded, v.labels?.length)
+            out.log(`${color}  ${String(i + 1).padStart(2)}. [${v.answer}${meaning ? ` = ${meaning}` : ''}] ${v.question}  (${v.identifierDecoded})${note}${RESET}`)
+        }
+        if (kept.length + contested.length > 0) {
+            out.log('\nLeft as committed (a batch run never replaces your on-chain commitment):')
+            for (const p of kept) out.log(`  ${GREEN}✓${RESET} ${p.question.slice(0, 70)}  committed ${priceLabel(p.onchainPrice!, p.identifierDecoded, p.labels?.length)}, ${whose(p)}`)
+            for (const p of contested) out.log(`  ${GREEN}✓${RESET} ${p.question.slice(0, 70)}  committed ${priceLabel(p.onchainPrice!, p.identifierDecoded, p.labels?.length)}; undecided: ${sides(p)}; change it in the review if you mean to`)
         }
         if (problems.length > 0) {
             out.log('\nNot committing:')
             for (const p of problems) out.log(`  ⚠ ${p}`)
         }
         if (votes.length === 0) {
+            if (kept.length + contested.length > 0 && problems.length === 0) {
+                out.log(`\n${GREEN}✓ Nothing to send — your on-chain commitments stand.${RESET}`)
+                return 0
+            }
             out.error('\nNothing committable. Aborting.')
             return 1
         }
@@ -372,16 +424,20 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
             out.log(`\n⚠️  ${unclaimed.length} of your on-chain commitment(s) have no counterpart in this vote set — they stay as committed.`)
         }
 
-        // Send only what actually changes the on-chain state; --force re-sends everything.
+        // Send only what actually changes the on-chain state. --force also
+        // re-sends the rows whose commitment already matches; the differing
+        // rows were zeroed above (keepsCommitment) and stay as committed
+        // whatever the flag says. Only with the diff unavailable (onchain
+        // undefined, --force) does this send over an existing commitment.
         const changed = votes.filter(p => p.onchainPrice === undefined || p.onchainPrice !== p.price)
         const sendReqs = onchain && !force ? changed : votes
         if (onchain && sendReqs.length === 0) {
             out.log(`\n${GREEN}✓ Your on-chain commitments already match all ${votes.length} vote(s) — nothing to change.${RESET}`)
-            out.log(`Re-send anyway with --force.`)
+            out.log(`--force re-sends the matching commitments as they are.`)
             return 0
         }
         if (onchain && sendReqs.length < votes.length) {
-            out.log(`\nCommitting only the ${sendReqs.length} changed/uncommitted vote(s) — the other ${votes.length - sendReqs.length} on-chain commitment(s) stay valid (--force re-sends all).`)
+            out.log(`\nCommitting only the ${sendReqs.length} changed/uncommitted vote(s) — the other ${votes.length - sendReqs.length} on-chain commitment(s) stay valid (--force re-sends the matching ones too).`)
         }
         toSend = sendReqs.map(p => toPlannedVote(p, p.price!))
 

@@ -5,11 +5,12 @@
 // only what differs from the on-chain commitments.
 import React, { useState, useEffect, useRef } from 'react'
 import { render, Box, Text, useInput } from 'ink'
-import { encodePrice, fmtCountdown, titleFromText } from './common'
+import { encodePrice, describePrice, priceProblem, typedPriceProblem, multipleValuesLabels, fmtCountdown, titleFromText } from './common'
 import { priceLabel } from './compare'
-import { fetchDiscordThread, flattenThread, type ThreadMessage } from './discord'
+import { reviewStatus } from './answers'
+import { fetchDiscussion, flattenThread, discussionNote, type Discussion } from './discord'
 import { resolveAncillaryText, descriptionFromText, fetchAiSummary, mapLimit, type OutcomeSummary } from './resolve'
-import { roundNavDelta, hyperlink, linkifyUrls, URL_RE, urlLabel } from './tui'
+import { roundNavDelta, hyperlink, linkifyUrls, pinnedWarnings, URL_RE, urlLabel } from './tui'
 
 export type ReviewRow = {
     question: string
@@ -19,9 +20,15 @@ export type ReviewRow = {
     time: bigint
     ancillaryData: `0x${string}`
     answer: string              // planned answer; '' = unanswered (skipped on commit)
-    sourceAnswer?: string       // as delivered by the answers source, for reference
-    divergedFrom?: string       // your earlier choice that a newer source superseded (3-way merge)
+    decided?: boolean           // the answer is yours (typed, or confirmed earlier); false/absent = a suggestion you have not confirmed
+    sourceAnswer?: string       // the sources' agreed answer, for reference (undefined: none, or they disagree)
+    sources?: Array<{ addon: string; answer: string; confidence: string }>   // every source's non-empty answer with its measured confidence ("not rated" when none)
+    conflicts?: Array<{ addon: string; reason: string }>   // sources that found the vote contested, with their reasons; the vote opens blank like a disagreement
+    disagree?: boolean          // sources gave different answers, or one reported a conflict; opens blank unless you decided earlier
+    sourceChanged?: { from: string; to: string }       // decided row: the agreed source answer moved since you decided; your answer stays
+    suggestionChanged?: { from: string; to: string }   // suggestion row: the suggestion is not the one you last saw; nothing is yours until you confirm
     onchainPrice?: bigint       // your current on-chain commitment, if any
+    labels?: string[]           // MULTIPLE_VALUES: the request's labels, one value each; undefined = count unknown, custom values refused
 }
 
 export type ReviewOpts = {
@@ -110,6 +117,11 @@ const ancillaryText = (ancillaryData: `0x${string}`): string | undefined => {
 // isActive-gated off — so edited answers survive a round trip to a past round.
 export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWallet, active = true }: { opts: ReviewOpts; onDone: (outcome: ReviewOutcome) => void; onRoundNav?: (delta: 1 | -1) => void; onAbout?: () => void; onReload?: (rows: ReviewRow[]) => void; onWallet?: () => void; active?: boolean }) {
     const [rows] = useState(() => opts.rows.map(r => ({ ...r })))
+    // What each row opened with: the status shown for a row ("yours" or a
+    // suggestion, a flagged move) follows the owner's edits against this,
+    // by the same rules the save applies (reviewStatus)
+    const prefilled = useRef(opts.rows.map(r => r.answer))
+    const statusOf = (r: ReviewRow) => reviewStatus(r, prefilled.current[rows.indexOf(r)] ?? r.answer)
     const [cursor, setCursor] = useState(0)
     const [top, setTop] = useState(0)
     const [view, setView] = useState<'list' | 'details' | 'summary' | 'ai' | 'comments' | 'custom' | 'confirm' | 'exit' | 'provenance'>('list')
@@ -117,22 +129,35 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     const [customBuf, setCustomBuf] = useState('')
     // where the custom-price input was opened from, so enter/esc return there
     const [customFrom, setCustomFrom] = useState<'list' | 'details' | 'summary' | 'ai' | 'comments'>('list')
-    // threads keyed by row index: undefined = not fetched, null = loading
-    const [threads, setThreads] = useState<Record<number, ReturnType<typeof flattenThread> | null>>({})
+    // discussions keyed by row index: undefined = not fetched, null = loading;
+    // `flat` is the thread one comment at a time, `info` says where it lives
+    // on Discord and whether its text came back (see discussionNote)
+    const [threads, setThreads] = useState<Record<number, { flat: ReturnType<typeof flattenThread>; info: Discussion } | null>>({})
     // summary view data per row: question text + AI summary (null = summary loading)
     const [docs, setDocs] = useState<Record<number, { text?: string; textDone?: boolean; summary?: OutcomeSummary[] | null }>>({})
     const [docScroll, setDocScroll] = useState(0)   // text scroll offset (lines)
     const maxScrollRef = useRef(0)                  // published by scrollText each render
     const [, force] = useState(0)
 
+    // The answer keys depend on the identifier: P1-P4 for YES_OR_NO_QUERY,
+    // no/yes for the binary identifiers, and for MULTIPLE_VALUES only 4 (too
+    // early) with the values typed under v.
+    const isMultiple = (r: ReviewRow) => r.identifierDecoded === 'MULTIPLE_VALUES'
+
     // Placeholder questions (hash-only cross-chain requests with no answers file)
     // resolve to real titles in the background via the dApp; cached on disk
     useEffect(() => {
         let alive = true
-        mapLimit(rows.filter(r => r.needsTitle), 5, async r => {
+        // MULTIPLE_VALUES rows without their labels (the flow could not
+        // resolve the text) get another go here, so custom values become
+        // available once the count is known
+        mapLimit(rows.filter(r => r.needsTitle || (isMultiple(r) && r.labels === undefined)), 5, async r => {
             const text = await resolveAncillaryText(r.identifier, r.time, r.ancillaryData)
-            const title = text && titleFromText(text)
-            if (title && alive) { r.question = title; r.needsTitle = false; force(x => x + 1) }
+            if (!text || !alive) return
+            const title = r.needsTitle ? titleFromText(text) : undefined
+            if (title) { r.question = title; r.needsTitle = false }
+            if (isMultiple(r) && r.labels === undefined) r.labels = multipleValuesLabels(text)
+            if (title || r.labels) force(x => x + 1)
         })
         return () => { alive = false }
     }, [])
@@ -155,7 +180,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     }, [view, cursor])
 
     const row = rows[cursor]
-    const priceOf = (r: ReviewRow) => r.answer ? encodePrice(r.answer, r.identifierDecoded) : undefined
+    const priceOf = (r: ReviewRow) => r.answer ? encodePrice(r.answer, r.identifierDecoded, r.labels?.length) : undefined
     const unanswered = (r: ReviewRow) => priceOf(r) === undefined
     // "will this send a tx": answered, and (no diff data | --force | differs from chain)
     const willSend = (r: ReviewRow) => {
@@ -166,9 +191,22 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     }
     const sendCount = rows.filter(willSend).length
     const unansweredRows = rows.filter(unanswered)
-    // Rows where a newer source superseded your earlier choice (3-way merge) —
-    // the current answer is the source's; divergedFrom is what you had.
-    const divergedRows = rows.filter(r => r.divergedFrom !== undefined)
+    // Rows the sources disagree on (left blank unless you decided earlier),
+    // rows where the agreed source answer moved since you decided (your answer
+    // stays; the new value is shown), and rows whose suggestion changed since
+    // you last saw it (the new suggestion is shown; it is not yours)
+    const disagreeRows = rows.filter(r => r.disagree)
+    const changedRows = rows.filter(r => statusOf(r).sourceChanged !== undefined)
+    const resuggestedRows = rows.filter(r => statusOf(r).suggestionChanged !== undefined)
+    // one line per source that found the vote contested (row suffix, details)
+    const conflictLine = (r: ReviewRow) => (r.conflicts ?? []).map(c => `${c.addon}: ${c.reason}`).join(' · ')
+    // Why the custom input cannot be applied as typed; undefined when it can.
+    // MULTIPLE_VALUES takes the list form only (one value per label): a bare
+    // integer is read as a packed price elsewhere, which a typist never means.
+    const customProblem = (r: ReviewRow, text: string): string | undefined => typedPriceProblem(text, r.identifierDecoded, r.labels)
+    // one source per line, with its confidence (details view and the row suffix)
+    const sourceLine = (s: { addon: string; answer: string; confidence: string }) =>
+        <Text><Text dimColor>{s.addon.padEnd(14)}</Text><Text color={answerColor(s.answer)} bold>{s.answer.padEnd(6)}</Text> <Text dimColor>{s.confidence}</Text></Text>
     // Trust warnings from the answers source stay visible in the list and the
     // confirm modal — the log panel they originally printed to is covered by
     // this review. `p` shows the full source report.
@@ -176,13 +214,17 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     // Case-sensitive: the trust vocabulary is uppercase in the sources —
     // /i would promote innocuous "differs from"-style info lines too
     const warnings = notices.filter(l => /⚠|❌|NOT verified|UNVERIFIED|NEW CONTRIBUTOR|DIFFER/.test(l))
+    // Only the first few are pinned (list and confirm modal); the rest are
+    // behind p, where the whole report scrolls with the terminal
+    const pinned = pinnedWarnings(warnings)
+    const morePinned = pinned.more > 0 ? <Text color="yellow" dimColor> and {pinned.more} more, press p</Text> : null
 
     const fetchThread = (i: number) => {
         if (threads[i] !== undefined) return
         setThreads(t => ({ ...t, [i]: null }))
         const r = rows[i]
-        fetchDiscordThread(r.time.toString(), r.identifierDecoded, r.question)
-            .then(th => setThreads(t => ({ ...t, [i]: flattenThread(th) })))
+        fetchDiscussion(r.time.toString(), r.identifierDecoded, r.question)
+            .then(info => setThreads(t => ({ ...t, [i]: { flat: flattenThread(info.thread), info } })))
     }
     const openComments = () => {
         setCommentIdx(0)
@@ -206,6 +248,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     const answerKey = (input: string) => {
         if (/^[1-4]$/.test(input)) {
             if (row.identifierDecoded === 'YES_OR_NO_QUERY') row.answer = `P${input}`
+            else if (isMultiple(row)) { if (input !== '4') return false; row.answer = 'P4' }
             else if (input === '1') row.answer = 'no'
             else if (input === '2') row.answer = 'yes'
             else return false
@@ -213,7 +256,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
             return true
         }
         if (input === 'v') {
-            setCustomBuf(/^-?\d+(\.\d+)?$/.test(row.answer) ? row.answer : '')
+            setCustomBuf(/^-?\d+(\.\d+)?$/.test(row.answer) || (isMultiple(row) && /^[\d,\s[\]]+$/.test(row.answer)) ? row.answer : '')
             setCustomFrom(view === 'details' || view === 'summary' || view === 'ai' || view === 'comments' ? view : 'list')
             setView('custom')
             return true
@@ -239,16 +282,23 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
 
     useInput((input, key) => {
         if (view === 'custom') {
-            // typing owns ALL keys — '[' and ctrl+arrows are inert here, no round nav
+            // typing owns ALL keys — '[' and ctrl+arrows are inert here, no round nav.
+            // MULTIPLE_VALUES takes a value list ("73, 75", label order) or the
+            // packed integer; the encoder rejects anything else, so the row
+            // shows "needs answer" rather than committing a wrong price.
+            // Enter applies only what encodes: a value list with exactly one
+            // value per label (refused while the label count is unknown), or
+            // a custom price within the identifier's decimals. Anything else
+            // stays in the input with the reason shown under it.
             if (key.return) {
-                if (customBuf === '' || /^-?\d+(\.\d+)?$/.test(customBuf)) {
+                if (customBuf === '' || customProblem(row, customBuf) === undefined) {
                     row.answer = customBuf
                     setView(customFrom); force(x => x + 1)
                 }
             }
             else if (key.escape) setView(customFrom)
             else if (key.backspace || key.delete) setCustomBuf(s => s.slice(0, -1))
-            else if (/^[\d.-]$/.test(input)) setCustomBuf(s => s + input)
+            else if (/^[\d.-]$/.test(input) || (isMultiple(row) && /^[, ]$/.test(input))) setCustomBuf(s => s + input)
             return
         }
         // [ ]/ctrl+←→ = prev/next ROUND everywhere except custom (above) and the
@@ -256,10 +306,10 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
         // standalone these keys do nothing (bindings mean the same everywhere)
         const roundDelta = roundNavDelta(input, key)
         if (roundDelta !== 0 && view !== 'confirm' && view !== 'exit') { onRoundNav?.(roundDelta); return }
-        // r = reload: re-pull answers from the addon (embedded app only). The
-        // the source often publishes mid-commit-phase; hand the current rows up
-        // so the restart persists them and the freshly pulled answers overlay
-        // these edits. Not from the confirm/exit modals (those own y/n).
+        // r = reload: ask every addon again (embedded app only). A source often
+        // publishes mid-commit-phase; hand the current rows up so the restart
+        // persists them and the refreshed answers merge under these edits. Not
+        // from the confirm/exit modals (those own y/n).
         if (onReload && input === 'r' && view !== 'confirm' && view !== 'exit') { onReload(rows); return }
         if (view === 'provenance') {
             if (key.escape || input === 'p' || input === 'q') setView('list')
@@ -271,7 +321,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
             if (switchView(input)) return
             if (view === 'comments') {
                 // pgup/pgdn step between comments; ↑↓ scroll inside the body
-                const n = threads[cursor]?.length ?? 0
+                const n = threads[cursor]?.flat.length ?? 0
                 if (key.pageUp && n > 0) { setCommentIdx(i => (i - 1 + n) % n); return }
                 if (key.pageDown && n > 0) { setCommentIdx(i => (i + 1) % n); return }
             }
@@ -321,14 +371,25 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
 
     // one-line question position + planned/on-chain status, shared by the
     // subviews so answering from summary/comments is visibly confirmed
+    // "yours" once you typed it or confirmed it; until then a prefilled
+    // answer is a suggestion, which a batch run will not sign
+    const whose = (r: ReviewRow) => r.answer === '' ? '' : statusOf(r).decided ? 'yours' : 'suggested, not yet yours'
+    // the encoded price beside answers whose text does not say it (MULTIPLE_VALUES)
+    const priceNote = (r: ReviewRow) => {
+        const p = priceOf(r)
+        if (p === undefined) return undefined
+        const meaning = describePrice(p, r.identifierDecoded, r.labels?.length)
+        return meaning ? `price ${p.toString()} = ${meaning}` : `price ${p.toString()}`
+    }
+    // the committed price in words for this request's identifier
+    const onchainLabel = (r: ReviewRow) => priceLabel(r.onchainPrice!, r.identifierDecoded, r.labels?.length)
     const statusLine = (
-        <Text><Text dimColor>question {cursor + 1}/{rows.length} · </Text>planned: <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED'}</Text> · on-chain: {row.onchainPrice !== undefined
-            ? <Text color={answerColor(priceLabel(row.onchainPrice))}>{priceLabel(row.onchainPrice)}</Text>
+        <Text><Text dimColor>question {cursor + 1}/{rows.length} · </Text>planned: <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED'}</Text>{whose(row) ? <Text dimColor> ({whose(row)})</Text> : null} · on-chain: {row.onchainPrice !== undefined
+            ? <Text color={answerColor(onchainLabel(row))}>{onchainLabel(row)}</Text>
             : <Text dimColor>not committed</Text>}</Text>
     )
 
     if (view === 'details') {
-        const p = priceOf(row)
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
@@ -337,14 +398,23 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
                 <Text>identifier:  <Text color="cyan">{row.identifierDecoded}</Text></Text>
                 <Text>timestamp:   {fmtUnix(row.time)}</Text>
                 <Text>ancillary:   {shortHex(row.ancillaryData, 24)} ({(row.ancillaryData.length - 2) / 2} bytes)</Text>
-                <Text>source:      <Text color={answerColor(row.sourceAnswer ?? '')}>{row.sourceAnswer ?? '(no answer from source)'}</Text></Text>
+                <Text>discord:     {threads[cursor]
+                    ? <Text dimColor>{hyperlink(threads[cursor]!.info.link, threads[cursor]!.info.threadId ? "this vote's thread" : 'the discussion channel (no thread known)')}{threads[cursor]!.info.ok && threads[cursor]!.info.threadId && threads[cursor]!.flat.length === 0 ? ' — no message text came back; read it there' : ''}</Text>
+                    : <Text dimColor>c to look the thread up</Text>}</Text>
+                {(row.sources ?? []).length === 0
+                    ? <Text>sources:     <Text dimColor>(no answer from any source)</Text></Text>
+                    : (row.sources ?? []).map((s, i) => <Text key={`s${i}`}>{i === 0 ? 'sources:     ' : '             '}{sourceLine(s)}</Text>)}
+                {(row.conflicts ?? []).map((c, i) => <Text key={`c${i}`} color="yellow">⚠ {c.addon} sees a conflict: {c.reason}</Text>)}
+                {row.disagree && <Text color="yellow">⚠ {(row.conflicts ?? []).length > 0 ? 'a source found this vote contested' : 'sources disagree'} — this vote is yours to decide{row.answer && statusOf(row).decided ? ` (your ${row.answer} stands)` : ''}</Text>}
+                {isMultiple(row) && <Text>labels:      {row.labels ? <Text color="cyan">{row.labels.join(', ')}</Text> : <Text color="red">unknown (text did not resolve) — custom values refused, 4 for too early</Text>}</Text>}
                 <Text>on-chain:    {row.onchainPrice !== undefined
-                    ? <Text color={answerColor(priceLabel(row.onchainPrice))}>{priceLabel(row.onchainPrice)}</Text>
+                    ? <Text color={answerColor(onchainLabel(row))}>{onchainLabel(row)}</Text>
                     : <Text dimColor>{opts.diffAvailable ? 'not committed' : 'unknown (diff unavailable)'}</Text>}</Text>
-                <Text>planned:     <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED — will be skipped'}</Text>{p !== undefined ? <Text dimColor>  (price {p.toString()})</Text> : null}</Text>
-                {row.divergedFrom !== undefined && <Text color="magenta">⟳ upstream:   changed since your last review — your earlier choice was {row.divergedFrom || '(blank)'} (re-enter it to override)</Text>}
+                <Text>planned:     <Text color={answerColor(row.answer)}>{row.answer || 'UNANSWERED — will be skipped'}</Text>{whose(row) ? <Text dimColor>  ({whose(row)})</Text> : null}{priceNote(row) ? <Text dimColor>  ({priceNote(row)})</Text> : null}</Text>
+                {statusOf(row).sourceChanged !== undefined && <Text color="magenta">⟳ source moved since you decided: was {statusOf(row).sourceChanged!.from || '(blank)'}, now {statusOf(row).sourceChanged!.to} — your {row.answer || '(blank)'} stays unless you change it</Text>}
+                {statusOf(row).suggestionChanged !== undefined && <Text color="magenta">⟳ the suggestion changed since you last saw it: was {statusOf(row).suggestionChanged!.from}, now {statusOf(row).suggestionChanged!.to} — not yours until you confirm or set it</Text>}
                 <Text> </Text>
-                <Text dimColor>←→ prev/next question{roundHint} · 1-4 v answer · s summary · a AI · c comments · esc/d back</Text>
+                <Text dimColor>←→ prev/next question{roundHint} · {isMultiple(row) ? '4 too early · v values' : '1-4 v answer'} · s summary · a AI · c comments · esc/d back</Text>
             </Box>
         )
     }
@@ -415,15 +485,20 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     }
     if (view === 'comments') {
         const thread = threads[cursor]
-        const c = thread?.[commentIdx]
+        const c = thread?.flat[commentIdx]
+        // The vote's place on Discord, as the dApp links it: its thread when
+        // one is known, else the discussion channel. Shown even with the
+        // messages here, so the live thread is one ctrl+click away.
+        const note = thread ? discussionNote(thread.info) : undefined
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold wrap="wrap">{row.question}</Text>
                 {statusLine}
                 {thread === null && <Text dimColor>fetching Discord thread…</Text>}
-                {thread && thread.length === 0 && <Text dimColor>No comments (or thread not cached — current round only).</Text>}
+                {thread && <Text dimColor>Discord: {hyperlink(thread.info.link, thread.info.threadId ? "this vote's thread" : 'the discussion channel (no thread known for this vote)')}</Text>}
+                {note && <Text color={thread!.info.ok ? 'yellow' : 'red'} wrap="wrap">{linkifyUrls(note)}</Text>}
                 {c && <>
-                    <Text dimColor>comment {commentIdx + 1}/{thread!.length}  {commentIdx > 0 ? '▲ pgup' : '      '}  {commentIdx < thread!.length - 1 ? 'pgdn ▼' : ''}</Text>
+                    <Text dimColor>comment {commentIdx + 1}/{thread!.flat.length}  {commentIdx > 0 ? '▲ pgup' : '      '}  {commentIdx < thread!.flat.length - 1 ? 'pgdn ▼' : ''}</Text>
                     <Text> </Text>
                     <Text>{'  '.repeat(c.depth)}<Text color="green" bold>{c.sender}</Text> <Text dimColor>{new Date(c.time * 1000).toISOString().slice(5, 16).replace('T', ' ')}{c.depth > 0 ? ' (reply)' : ''}</Text></Text>
                     {scrollText(c.message)}
@@ -436,7 +511,17 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     if (view === 'custom') return (
         <Box flexDirection="column" borderStyle="round" paddingX={1}>
             <Text bold wrap="wrap">{row.question}</Text>
-            <Text>Custom price (human units, scaled ×1e18 on-chain; empty = unanswered): <Text color="cyan">{customBuf}</Text><Text inverse> </Text></Text>
+            {isMultiple(row)
+                ? row.labels
+                    ? <Text>One value per label, in this order: <Text color="cyan">{row.labels.join(', ')}</Text> ({row.labels.length} value(s), e.g. {row.labels.map((_, i) => 70 + i).join(', ')}; packed into one int256 as the dApp does; empty = unanswered): <Text color="cyan">{customBuf}</Text><Text inverse> </Text></Text>
+                    : <Text color="red">Label count unknown for this request (its text did not resolve), so custom values are refused rather than packed on a guess. Press 4 for too early, or esc.</Text>
+                : <Text>Custom price (human units, scaled on-chain by the identifier's precision; empty = unanswered): <Text color="cyan">{customBuf}</Text><Text inverse> </Text></Text>}
+            {customBuf !== '' && (() => {
+                const problem = customProblem(row, customBuf)
+                if (problem !== undefined) return <Text color="red">{problem}</Text>
+                const p = encodePrice(customBuf, row.identifierDecoded, row.labels?.length)!
+                return <Text dimColor>price {p.toString()}{isMultiple(row) ? ` = ${describePrice(p, row.identifierDecoded, row.labels?.length)}` : ''}</Text>
+            })()}
             <Text dimColor>enter apply · esc cancel</Text>
         </Box>
     )
@@ -468,13 +553,14 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
                 <Text bold>Commit {sending.length} vote(s) for round {opts.roundId}? ({rows.length} request(s) total{unchanged > 0 ? `, ${unchanged} already match on-chain` : ''})</Text>
                 {sending.map((x, i) => (
-                    <Text key={i} color="yellow" wrap="truncate-end">  {x.question.slice(0, 60).padEnd(61)} {x.onchainPrice !== undefined ? priceLabel(x.onchainPrice) : '—'} → <Text color={answerColor(x.answer)}>{x.answer}</Text></Text>
+                    <Text key={i} color="yellow" wrap="truncate-end">  {x.question.slice(0, 60).padEnd(61)} {x.onchainPrice !== undefined ? onchainLabel(x) : '—'} → <Text color={answerColor(x.answer)}>{x.answer}</Text>{isMultiple(x) ? <Text dimColor> = {describePrice(priceOf(x)!, x.identifierDecoded, x.labels?.length)}</Text> : null}</Text>
                 ))}
                 {unansweredRows.length > 0 && <Text> </Text>}
                 {unansweredRows.length > 0 && <Text color="red" bold>⚠ {unansweredRows.length} request(s) UNANSWERED — SKIPPED, no commit (risk of no-vote slashing if they resolve):</Text>}
                 {unansweredRows.map((x, i) => <Text key={`u${i}`} color="red" wrap="truncate-end">  {x.question.slice(0, 70)}</Text>)}
                 {warnings.length > 0 && <Text> </Text>}
-                {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap">{linkifyUrls(l)}</Text>)}
+                {pinned.shown.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap">{linkifyUrls(l)}</Text>)}
+                {morePinned}
                 <Text> </Text>
                 {sending.length > 0
                     ? <Text dimColor>y commit (wallet confirmation follows) · n back{unansweredRows.length > 0 ? ' and answer the red ones' : ''}</Text>
@@ -488,11 +574,19 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     return (
         <Box flexDirection="column">
             <Text bold> Round {opts.roundId} — commit phase, {fmtCountdown(opts.phaseEnd)} left · {rows.length} request(s) · <Text color="yellow">{sendCount} to send</Text>{unansweredRows.length > 0 ? <Text color="red"> · {unansweredRows.length} unanswered</Text> : null}{!opts.diffAvailable ? <Text color="red"> · NO DIFF{opts.force ? ' (--force)' : ''}</Text> : null}</Text>
-            {warnings.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap"> {linkifyUrls(l)}</Text>)}
+            {pinned.shown.map((l, i) => <Text key={`w${i}`} color="yellow" wrap="wrap"> {linkifyUrls(l)}</Text>)}
+            {morePinned}
             {/* Rollover before the source published: no answer landed for any
                 request — point the user at r to re-pull instead of answering 17 by hand */}
-            {onReload && rows.every(r => !r.sourceAnswer) && <Text color="yellow" wrap="wrap"> No answers from the source yet — press <Text bold>r</Text> to re-pull from the addon.</Text>}
-            {divergedRows.length > 0 && <Text color="magenta" wrap="wrap"> ⟳ {divergedRows.length} answer(s) changed upstream since your last review — your earlier pick is shown per row and in details (d).</Text>}
+            {onReload && rows.every(r => !(r.sources?.length)) && <Text color="yellow" wrap="wrap"> No answers from any source yet — press <Text bold>r</Text> to ask the addons again.</Text>}
+            {disagreeRows.length > 0 && <Text color="yellow" wrap="wrap"> ⚠ {disagreeRows.length} vote(s) where the sources disagree or a source found the vote contested — each is yours to decide; the answers and reasons are shown per row and in details (d).</Text>}
+            {changedRows.length > 0 && <Text color="magenta" wrap="wrap"> ⟳ {changedRows.length} source answer(s) moved since you decided — your answers stay; the new value is shown per row and in details (d).</Text>}
+            {resuggestedRows.length > 0 && <Text color="magenta" wrap="wrap"> ⟳ {resuggestedRows.length} suggestion(s) changed since you last looked — the new suggestion is prefilled; nothing is yours until you confirm (C, y) or set it.</Text>}
+            {/* the highlighted row's suggestions with their confidence, so every
+                suggestion's basis is readable from the list without opening d */}
+            {row && <Text wrap="truncate-end"> <Text dimColor>sources for #{cursor + 1}:</Text> {(row.sources ?? []).length === 0
+                ? <Text dimColor>none</Text>
+                : (row.sources ?? []).map((s, i) => <Text key={i}>{i > 0 ? ' · ' : ''}{s.addon} <Text color={answerColor(s.answer)} bold>{s.answer}</Text> <Text dimColor>({s.confidence})</Text></Text>)}</Text>}
             <Text dimColor> {top > 0 ? `▲ ${top} more` : '─'.repeat(10)}</Text>
             {slice.map((x, i) => {
                 const idx = top + i
@@ -507,18 +601,21 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
                         <Text color={answerColor(x.answer)} bold>{label.padEnd(7)}</Text>
                         <Text color={sends ? 'yellow' : undefined} dimColor={needsAnswer}>{x.question.slice(0, QUESTION_WIDTH).padEnd(QUESTION_WIDTH + 1)}</Text>
                         {needsAnswer
-                            ? <Text color="red"> ⚠ needs answer{x.answer ? ` (can't encode "${x.answer.slice(0, 12)}")` : ''}</Text>
+                            ? <Text color="red"> ⚠ needs answer{x.answer ? ` (${priceProblem(x.answer, x.identifierDecoded, x.labels?.length)})` : ''}</Text>
                             : sends
-                                ? <Text dimColor> was {x.onchainPrice !== undefined ? priceLabel(x.onchainPrice) : '—'}</Text>
+                                ? <Text dimColor> was {x.onchainPrice !== undefined ? onchainLabel(x) : '—'}</Text>
                                 : <Text dimColor> ✓</Text>}
-                        {x.divergedFrom !== undefined && <Text color="magenta"> ⟳ was {x.divergedFrom || '(blank)'}</Text>}
+                        {isMultiple(x) && !needsAnswer && <Text dimColor> = {describePrice(priceOf(x)!, x.identifierDecoded, x.labels?.length)}</Text>}
+                        {x.disagree && <Text color="yellow"> ⚠ {[...(x.sources ?? []).map(s => `${s.addon} ${s.answer}`), conflictLine(x)].filter(Boolean).join(' · ')}</Text>}
+                        {statusOf(x).sourceChanged !== undefined && <Text color="magenta"> ⟳ source now {statusOf(x).sourceChanged!.to}, was {statusOf(x).sourceChanged!.from || '(blank)'}; yours stays</Text>}
+                        {statusOf(x).suggestionChanged !== undefined && <Text color="magenta"> ⟳ suggestion now {statusOf(x).suggestionChanged!.to}, was {statusOf(x).suggestionChanged!.from}; not yours yet</Text>}
                     </Text>
                 )
             })}
             <Text dimColor> {top + WINDOW < rows.length ? `▼ ${rows.length - top - WINDOW} more` : '─'.repeat(10)}</Text>
             <Text> </Text>
             <Legend />
-            <Text dimColor> ↑↓/←→/pg move{roundHint} · 1-4 answer{row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onReload ? ' · r reload' : ''}{onWallet ? ' · w wallet' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
+            <Text dimColor> ↑↓/←→/pg move{roundHint} · {row && isMultiple(row) ? '4 too early · v values' : `1-4 answer${row?.identifierDecoded !== 'YES_OR_NO_QUERY' ? ' (1 no · 2 yes)' : ' P1-P4'} · v custom`} · d/enter details · s summary · a AI · c comments{notices.length > 0 ? ' · p source' : ''}{onReload ? ' · r reload' : ''}{onWallet ? ' · w wallet' : ''}{onAbout ? ' · i about' : ''} · C commit · q quit</Text>
         </Box>
     )
 }

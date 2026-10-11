@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { umaContractAbi } from './umaAbi'
-import { UMA_VOTING_V2, RPC_URLS, ANSWERS_FILE, EXPECTED_VOTER, ROUNDS_DIR, ROOT } from './config'
+import { UMA_VOTING_V2, RPC_URLS, EXPECTED_VOTER, ROUNDS_DIR, ROOT } from './config'
 import { getWallet, signerKind } from './signers'
 import { ask } from './signers/prompt'
 
@@ -78,17 +78,120 @@ export const P1_VALUE = 0n
 export const P2_VALUE = 1_000000000000000000n
 export const P3_VALUE = 500000000000000000n
 export const P4_VALUE = -57896044618658097711785492504343953926634992332820282019728792003956564819968n // min int256, "too early"
+// max int256: MULTIPLE_VALUES "Unresolvable" (UMIP-183)
+export const UNRESOLVABLE_VALUE = 57896044618658097711785492504343953926634992332820282019728792003956564819967n
 
 const YES_ANSWERS = ['yes', 'true', 'valid', 'p2', '1']
 const NO_ANSWERS = ['no', 'false', 'invalid', 'p1', '0']
+
+// Identifiers the voter dApp scales to something other than 18 decimals
+// (voter-dapp-v2 helpers/web3/crypto.ts, IDENTIFIER_NON_18_PRECISION; its
+// TEST* entries left out). Everything else is parseFixed(value, 18).
+const NON_18_PRECISION: Record<string, number> = {
+    USDBTC: 8, 'STABLESPREAD/USDC': 6, 'STABLESPREAD/BTC': 8, 'ELASTIC_STABLESPREAD/USDC': 6,
+    BCHNBTC: 8, AMPLUSD: 6, 'COMPUSDC-APR-FEB28/USDC': 6, 'COMPUSDC-APR-MAR28/USDC': 6, SHERLOCK_CLAIM: 6,
+}
+export const pricePrecision = (decodedIdentifier: string): number => NON_18_PRECISION[decodedIdentifier] ?? 18
 
 export function decodeIdentifier(identifier: `0x${string}`): string {
     const decoded = hexToString(identifier).replace(/\0/g, '')
     return decoded.startsWith('Admin') ? 'Admin' : decoded
 }
 
-// Encoded on-chain price for an answer value, or undefined if it can't be determined
-export function encodePrice(answer: string, decodedIdentifier: string): bigint | undefined {
+// MULTIPLE_VALUES (UMIP-183) packs up to 7 uint32 values into one int256:
+// label i sits at bits 32i..32i+31, the top 32 bits stay zero. The dApp
+// (helpers/voting/projects/polymarket.ts encodeMultipleQuery) builds that
+// integer and formatVotes.ts commits it as is, with no decimal scaling, so an
+// answer for this identifier is the packed integer itself. Round 10162 settled
+// "Minnesota Lynx vs Atlanta Dream" at 322122547273 = [73, 75].
+export const MAX_MULTIPLE_VALUES = 7
+export function encodeMultipleValues(values: number[]): bigint {
+    if (values.length > MAX_MULTIPLE_VALUES) throw new RangeError(`at most ${MAX_MULTIPLE_VALUES} values`)
+    let price = 0n
+    for (const [i, v] of values.entries()) {
+        if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new RangeError(`value ${v} is not a uint32`)
+        price |= BigInt(v) << BigInt(32 * i)
+    }
+    return price
+}
+// The values a packed price holds, one per slot, or undefined for the two
+// magic prices and for anything with bits set above the 7 slots (invalid per
+// the UMIP). With the request's label count the result has exactly that many
+// slots, zeros included, like the dApp's decodeMultipleQuery(price, labels);
+// a price that uses slots beyond the labels, or a price with no label count
+// known, comes back as all 7 slots so nothing is hidden.
+export function decodeMultipleValues(price: bigint, labelCount?: number): number[] | undefined {
+    if (price === P4_VALUE || price === UNRESOLVABLE_VALUE || price < 0n || price >> BigInt(32 * MAX_MULTIPLE_VALUES) !== 0n) return undefined
+    const values: number[] = []
+    for (let i = 0; i < MAX_MULTIPLE_VALUES; i++) values.push(Number((price >> BigInt(32 * i)) & 0xffffffffn))
+    if (labelCount !== undefined && labelCount >= 1 && labelCount <= MAX_MULTIPLE_VALUES && values.slice(labelCount).every(v => v === 0)) return values.slice(0, labelCount)
+    return values
+}
+
+// The labels of a MULTIPLE_VALUES request, from its decoded ancillary text:
+// the dApp (helpers/voting/getVoteMetaData.ts decodeMultipleValuesQuery)
+// parses the text up to its last "}" as JSON {title, description, labels}
+// and renders one input per label; its modal saves only when every input
+// holds a value, so a vote carries exactly labels.length values in label
+// order. undefined when the text is not that JSON (or has more than 7
+// labels): the count is then unknown and custom values are refused.
+export function multipleValuesLabels(text: string): string[] | undefined {
+    const end = text.lastIndexOf('}')
+    try {
+        const json = JSON.parse(end > 0 ? text.slice(0, end + 1) : text) as { labels?: unknown }
+        const labels = json?.labels
+        if (!Array.isArray(labels) || labels.length === 0 || labels.length > MAX_MULTIPLE_VALUES || !labels.every(l => typeof l === 'string')) return undefined
+        return labels.map(sanitizeText)
+    } catch { return undefined }
+}
+
+// "73, 75" or "[73, 75]" as a list of values; undefined when it is not one
+export const parseValueList = (text: string): number[] | undefined =>
+    /^\[?\s*\d+(\s*,\s*\d+)*\s*\]?$/.test(text.trim()) ? text.replace(/[[\]]/g, '').split(',').map(s => Number(s.trim())) : undefined
+
+// Why an answer has no price for the identifier, in words for the screen;
+// undefined when it encodes. Only the cases a typist runs into are named,
+// the rest is the generic line.
+export function priceProblem(answer: string, decodedIdentifier: string, labelCount?: number): string | undefined {
+    if (encodePrice(answer, decodedIdentifier, labelCount) !== undefined) return undefined
+    const a = answer.trim().toLowerCase()
+    if (decodedIdentifier === 'MULTIPLE_VALUES') {
+        const list = parseValueList(a)
+        if (list && labelCount === undefined) return 'label count unknown for this request: custom values are refused, only P4 (too early) and the packed integer can be entered'
+        if (list && list.length !== labelCount) return `this request has ${labelCount} label(s), so it takes exactly ${labelCount} value(s); ${list.length} given`
+        if (list) return 'every value must be an integer from 0 to 4294967295'
+        if (/^\d+$/.test(a)) return labelCount === undefined ? 'not a valid packing' : `packed integer uses slots beyond the request's ${labelCount} label(s)`
+        return 'not a value list'
+    }
+    const m = /^-?\d+\.(\d+)$/.exec(a)
+    if (m && m[1].length > pricePrecision(decodedIdentifier)) return `${m[1].length} decimals; ${decodedIdentifier} takes at most ${pricePrecision(decodedIdentifier)}`
+    return `can't encode "${answer}" for identifier ${decodedIdentifier}`
+}
+
+// Why a price typed into the review's custom input cannot be applied as
+// typed; undefined when it can. Stricter than priceProblem, which judges an
+// answer however it arrived: a MULTIPLE_VALUES request with known labels
+// takes the list form only, one value per label. A bare integer is a packed
+// price when a source file carries it, but a typist writing "73" for a
+// two-label request means one value, and 73 packs as [73, 0].
+export function typedPriceProblem(text: string, decodedIdentifier: string, labels: string[] | undefined): string | undefined {
+    if (decodedIdentifier === 'MULTIPLE_VALUES') {
+        if (labels === undefined) return 'label count unknown for this request (its text did not resolve): custom values are refused; 4 for too early'
+        const list = parseValueList(text)
+        if (list === undefined) return `one value per label, separated by commas (${labels.length} value(s))`
+        if (list.length !== labels.length) return `this request has ${labels.length} label(s), so it takes exactly ${labels.length} value(s), separated by commas; ${list.length} given`
+        return priceProblem(text, decodedIdentifier, labels.length)
+    }
+    if (!/^-?\d+(\.\d+)?$/.test(text)) return 'a number, like 1.5'
+    return priceProblem(text, decodedIdentifier)
+}
+
+// Encoded on-chain price for an answer value, or undefined if it can't be
+// determined. `labelCount` (MULTIPLE_VALUES only) is how many labels the
+// request has, when known: a value list must then have exactly that many
+// values and a packed integer must not use slots beyond them. Without it a
+// list packs as given and a packed integer is taken as is.
+export function encodePrice(answer: string, decodedIdentifier: string, labelCount?: number): bigint | undefined {
     const a = answer.trim().toLowerCase()
     if (decodedIdentifier === 'YES_OR_NO_QUERY') {
         if (a === 'p1') return P1_VALUE
@@ -101,11 +204,54 @@ export function encodePrice(answer: string, decodedIdentifier: string): bigint |
     } else if (decodedIdentifier === 'ACROSS-V2' || decodedIdentifier === 'ASSERT_TRUTH' || decodedIdentifier === 'ASSERT_TRUTH2' || decodedIdentifier === 'Admin') {
         if (YES_ANSWERS.includes(a)) return 1_000000000000000000n
         if (NO_ANSWERS.includes(a)) return 0n
+    } else if (decodedIdentifier === 'MULTIPLE_VALUES') {
+        // The packed integer as the dApp commits it, or one of the two magic
+        // prices: P4 / "too early" is min int256 (the dApp's "Early Request"),
+        // "unresolvable" is max int256. Values can also be given as a list
+        // ("73, 75" or "[73, 75]"), label order, and are packed here.
+        if (a === 'p4' || a === 'too early' || a === 'early') return P4_VALUE
+        if (a === 'unresolvable') return UNRESOLVABLE_VALUE
+        if (/^\d+$/.test(a)) {
+            const p = BigInt(a)
+            const values = decodeMultipleValues(p, labelCount)
+            if (!values) return undefined
+            return labelCount === undefined || values.length === labelCount ? p : undefined
+        }
+        const list = parseValueList(a)
+        if (list) {
+            if (labelCount !== undefined && list.length !== labelCount) return undefined
+            try { return encodeMultipleValues(list) } catch { return undefined }
+        }
+        return undefined
     }
-    // Custom numeric price in human units, scaled to 1e18 — the dApp's custom-input
+    // Custom numeric price in human units, scaled by the identifier's precision
+    // (18 unless the dApp's table says otherwise) — the dApp's custom-input
     // scheme. Also the only way to vote on identifiers without a yes/no mapping.
-    if (/^-?\d+(\.\d+)?$/.test(a)) return parseUnits(a, 18)
+    // More decimals than the precision are refused: the dApp's parseFixed
+    // throws on them, where viem's parseUnits would round and sign a price
+    // the typist never saw.
+    const m = /^-?\d+(?:\.(\d+))?$/.exec(a)
+    if (m) {
+        const precision = pricePrecision(decodedIdentifier)
+        if ((m[1]?.length ?? 0) > precision) return undefined
+        return parseUnits(a, precision)
+    }
     return undefined
+}
+
+// What an encoded price means, for identifiers where the answer text does not
+// say it: a MULTIPLE_VALUES answer is a packed integer, so the review shows
+// the values it holds next to it, one per label when the label count is
+// known (zeros included), else every slot. undefined where the answer speaks
+// for itself.
+export function describePrice(price: bigint, decodedIdentifier: string, labelCount?: number): string | undefined {
+    if (decodedIdentifier !== 'MULTIPLE_VALUES') return undefined
+    if (price === P4_VALUE) return 'too early (min int256)'
+    if (price === UNRESOLVABLE_VALUE) return 'unresolvable (max int256)'
+    const values = decodeMultipleValues(price, labelCount)
+    if (!values) return 'invalid packing'
+    if (labelCount === undefined) return `slots [${values.join(', ')}] (label count unknown)`
+    return values.length === labelCount ? `values [${values.join(', ')}]` : `slots [${values.join(', ')}] (beyond the ${labelCount} label(s))`
 }
 
 // Strips C0 controls (except \n) + DEL: crafted question titles could carry
@@ -144,34 +290,30 @@ export type Answer = {
     question: string
     answer: string
     skip?: boolean
+    // What the answer rests on, measured by the source that gave it: a figure
+    // plus its basis, in the source's own words ("N of M answers right over
+    // rounds A to B", "share X% of posts"). The host never computes or
+    // compares these; it shows them next to the suggestion. Absent = not rated.
+    confidence?: string
+    // Set (non-empty) when this source itself found the vote contested, in a
+    // few words why. The host then leaves the vote for the owner exactly as
+    // it does a disagreement, whatever the other sources say, and shows the
+    // reason. With answer '' this is not "no opinion": that is the point.
+    conflict?: string
 }
 
-// Answer resolution precedence: ANSWERS_FILE override → locally saved
-// answers/<roundId>.json → installed addons (see src/addons.ts).
+// A round's answers: ANSWERS_FILE override, else every installed addon merged
+// per vote, with the owner's saved review (answers/<round>.local.json) laid
+// over the top. The merge lives in src/answers.ts; this wrapper keeps the
+// read-only commands (status, questions, results) on the old shape.
 // NOTE: answers are returned raw — addon verifyBeforeCommit gates hash the
 // array as delivered, so nothing may mutate it before the gate. Display code
 // sanitizes questions where they are rendered (commit-flow planning).
 export async function getAnswers(roundId: number): Promise<{ source: string; answers: Answer[] } | undefined> {
-    if (ANSWERS_FILE) {
-        return { source: ANSWERS_FILE, answers: JSON.parse(readFileSync(ANSWERS_FILE, 'utf8')) }
-    }
-    const local = path.join(ROOT, 'answers', `${roundId}.json`)
-    if (existsSync(local)) {
-        return { source: `answers/${roundId}.json (local)`, answers: JSON.parse(readFileSync(local, 'utf8')) }
-    }
-    // Answers saved by an interactive commit review. Kept in a separate file so
-    // a pulled answers file is never overwritten and, once pulled, wins again.
-    const localInteractive = path.join(ROOT, 'answers', `${roundId}.local.json`)
-    if (existsSync(localInteractive)) {
-        return { source: `answers/${roundId}.local.json (your last interactive review)`, answers: JSON.parse(readFileSync(localInteractive, 'utf8')) }
-    }
     // Dynamic import: addons import this module, so the host loads lazily
-    const { loadAddons } = await import('./addons')
-    for (const addon of await loadAddons()) {
-        const r = await addon.getAnswers(roundId).catch(() => undefined)
-        if (r) return r
-    }
-    return undefined
+    const { collectAnswers } = await import('./answers')
+    const r = await collectAnswers(roundId)
+    return r.answers.length > 0 ? r : undefined
 }
 
 // React 19's reconciler dev build (which Ink loads — nub never sets NODE_ENV
