@@ -27,7 +27,7 @@ The docs and the live data disagree on the JSON shape, so accept both. The spec 
 
 ## Changes needed
 
-- [ ] **`src/common.ts` `titleFromText`.** It looks for `title:` and never matches `"title":"…"`. A V2 vote then gets a placeholder title, and the Discord thread lookup and AI summary both miss. Parse V2 first (JSON plus stamp check) and return its `title`. Then strip U+202F, which is all the dApp's `stripInvalidCharacters` removes, so the title matches the dApp's thread key.
+- [x] **`src/common.ts` `titleFromText`.** It looks for `title:` and never matches `"title":"…"`. A V2 vote then gets a placeholder title, and the Discord thread lookup and AI summary both miss. Parse V2 first (JSON plus stamp check) and return its `title`. Then strip U+202F, which is all the dApp's `stripInvalidCharacters` removes, so the title matches the dApp's thread key.
 - [ ] **`src/resolve.ts` `descriptionFromText`.** It looks for `description:` and returns nothing for V2. Build the description as the dApp does: `description`, then `res_data` (string or array), then `product_spec`, separated by blank lines.
 - [ ] **`src/common.ts` `encodePrice` for `NUMERICAL`.** Atomic neg-risk markets use the identifier `NUMERICAL`. The answer is the winning outcome's index times 1e18, and the index must be lower than the number of outcomes. A plain number already encodes that way (`"2"` gives 2e18). Two things are open. First, "too early" has no way in: `p4` returns nothing, and a typed min-int256 gets scaled. Second, it is not confirmed that `NUMERICAL` is approved for DVM votes. Decide both once a `NUMERICAL` vote shows up.
 - [ ] **Binary P3.** For V2 markets P3 (0.5) is valid only for the binary market type. Do not offer P3 on an atomic neg-risk vote.

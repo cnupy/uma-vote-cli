@@ -258,9 +258,34 @@ export function describePrice(price: bigint, decodedIdentifier: string, labelCou
 // ESC/cursor codes into Ink frames and spoof UI lines. Applied at ingestion.
 export const sanitizeText = (s: string): string => s.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '')
 
+// Polymarket V2 resolved text: a JSON object, then the reporter stamp. Mirrors
+// voter-dapp-v2 lib/polymarket-v2.ts: split at the last "}", require the exact
+// stamp, then JSON.parse. A MOOV2 childRequester alone is not V2 (legacy MOOV2
+// markets carry it too). res_data is a string in live data and an array of
+// {value, outcome} in UMA's spec, so both are kept as given.
+const V2_STAMP = /^,ooRequester:53703dd6129d723066b6362510e5ae2fecd48218,childRequester:2c0367a9db231ddebd88a94b4f6461a6e47c58b1,childChainId:137$/i
+export type PolymarketV2 = { title?: string; description?: string; marketId?: string; resData?: unknown; productSpec?: string }
+export const parsePolymarketV2 = (text: string): PolymarketV2 | undefined => {
+    const end = text.lastIndexOf('}')
+    if (end < 0 || !V2_STAMP.test(text.slice(end + 1).trim())) return undefined
+    try {
+        const j = JSON.parse(text.slice(0, end + 1))
+        if (!j || typeof j !== 'object' || Array.isArray(j)) return undefined
+        const str = (v: unknown) => typeof v === 'string' ? v : undefined
+        return {
+            title: str(j.title), description: str(j.description),
+            marketId: str(j.market_id) ?? str(j.integration_id),
+            resData: j.res_data, productSpec: str(j.product_spec),
+        }
+    } catch { return undefined }
+}
+
 // Question title extracted from decoded ancillary/resolved text — the single
-// home of the title regexes.
+// home of the title regexes. A V2 title also loses U+202F, as the dApp's
+// stripInvalidCharacters does, so it matches the dApp's Discord thread key.
 export const titleFromText = (text: string): string | undefined => {
+    const v2 = parsePolymarketV2(text)?.title?.replace(/\u202F/g, '').trim()
+    if (v2) return sanitizeText(v2)
     const t = (/title:\s*(.*?),\s*description:/s.exec(text) ?? /q:\s*"?([^"\n]{4,})/.exec(text))?.[1]?.trim()
     return t ? sanitizeText(t) : undefined
 }

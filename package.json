@@ -16,7 +16,7 @@
     "questions": "nub src/questions.ts",
     "verify-key": "nub src/verify-key.ts",
     "addon": "nub src/run-addon.ts",
-    "test": "nub src/answers.test.ts && nub src/discord.test.ts"
+    "test": "nub src/answers.test.ts && nub src/discord.test.ts && nub src/polymarket-v2.test.ts"
   },
   "dependencies": {
     "@ledgerhq/hw-app-eth": "^7.8.8",
