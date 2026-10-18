@@ -5,7 +5,7 @@
 // only what differs from the on-chain commitments.
 import React, { useState, useEffect, useRef } from 'react'
 import { render, Box, Text, useInput } from 'ink'
-import { encodePrice, describePrice, priceProblem, typedPriceProblem, multipleValuesLabels, fmtCountdown, titleFromText } from './common'
+import { encodePrice, describePrice, priceProblem, typedPriceProblem, multipleValuesLabels, fmtCountdown, titleFromText, rollTag } from './common'
 import { priceLabel } from './compare'
 import { reviewStatus } from './answers'
 import { fetchDiscussion, flattenThread, discussionNote, type Discussion } from './discord'
@@ -29,6 +29,8 @@ export type ReviewRow = {
     suggestionChanged?: { from: string; to: string }   // suggestion row: the suggestion is not the one you last saw; nothing is yours until you confirm
     onchainPrice?: bigint       // your current on-chain commitment, if any
     labels?: string[]           // MULTIPLE_VALUES: the request's labels, one value each; undefined = count unknown, custom values refused
+    rollCount?: number          // rounds this request rolled through before this one; shown as [roll] before the title
+    lastRound?: string          // rolled: how the last round voted on it, one line
 }
 
 export type ReviewOpts = {
@@ -392,12 +394,13 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     if (view === 'details') {
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
-                <Text bold wrap="wrap">{row.question}</Text>
+                <Text bold wrap="wrap"><Text color="magenta">{rollTag(row.rollCount)}</Text>{row.question}</Text>
                 <Text dimColor>question {cursor + 1}/{rows.length}</Text>
                 <Text> </Text>
                 <Text>identifier:  <Text color="cyan">{row.identifierDecoded}</Text></Text>
                 <Text>timestamp:   {fmtUnix(row.time)}</Text>
                 <Text>ancillary:   {shortHex(row.ancillaryData, 24)} ({(row.ancillaryData.length - 2) / 2} bytes)</Text>
+                {row.lastRound && <Text>last round:  {row.lastRound}</Text>}
                 <Text>discord:     {threads[cursor]
                     ? <Text dimColor>{hyperlink(threads[cursor]!.info.link, threads[cursor]!.info.threadId ? "this vote's thread" : 'the discussion channel (no thread known)')}{threads[cursor]!.info.ok && threads[cursor]!.info.threadId && threads[cursor]!.flat.length === 0 ? ' — no message text came back; read it there' : ''}</Text>
                     : <Text dimColor>c to look the thread up</Text>}</Text>
@@ -452,7 +455,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
         const description = text && (descriptionFromText(text) ?? text)
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
-                <Text bold wrap="wrap">{row.question}</Text>
+                <Text bold wrap="wrap"><Text color="magenta">{rollTag(row.rollCount)}</Text>{row.question}</Text>
                 {statusLine}
                 <Text> </Text>
                 {description
@@ -469,7 +472,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
         const s = docs[cursor]?.summary
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
-                <Text bold wrap="wrap">{row.question}</Text>
+                <Text bold wrap="wrap"><Text color="magenta">{rollTag(row.rollCount)}</Text>{row.question}</Text>
                 {statusLine}
                 <Text bold>AI discussion summary <Text dimColor>(the dApp's, grouped by outcome — not advice)</Text></Text>
                 <Text> </Text>
@@ -492,7 +495,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
         const note = thread ? discussionNote(thread.info) : undefined
         return (
             <Box flexDirection="column" borderStyle="round" paddingX={1}>
-                <Text bold wrap="wrap">{row.question}</Text>
+                <Text bold wrap="wrap"><Text color="magenta">{rollTag(row.rollCount)}</Text>{row.question}</Text>
                 {statusLine}
                 {thread === null && <Text dimColor>fetching Discord thread…</Text>}
                 {thread && <Text dimColor>Discord: {hyperlink(thread.info.link, thread.info.threadId ? "this vote's thread" : 'the discussion channel (no thread known for this vote)')}</Text>}
@@ -510,7 +513,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
     }
     if (view === 'custom') return (
         <Box flexDirection="column" borderStyle="round" paddingX={1}>
-            <Text bold wrap="wrap">{row.question}</Text>
+            <Text bold wrap="wrap"><Text color="magenta">{rollTag(row.rollCount)}</Text>{row.question}</Text>
             {isMultiple(row)
                 ? row.labels
                     ? <Text>One value per label, in this order: <Text color="cyan">{row.labels.join(', ')}</Text> ({row.labels.length} value(s), e.g. {row.labels.map((_, i) => 70 + i).join(', ')}; packed into one int256 as the dApp does; empty = unanswered): <Text color="cyan">{customBuf}</Text><Text inverse> </Text></Text>
@@ -587,6 +590,9 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
             {row && <Text wrap="truncate-end"> <Text dimColor>sources for #{cursor + 1}:</Text> {(row.sources ?? []).length === 0
                 ? <Text dimColor>none</Text>
                 : (row.sources ?? []).map((s, i) => <Text key={i}>{i > 0 ? ' · ' : ''}{s.addon} <Text color={answerColor(s.answer)} bold>{s.answer}</Text> <Text dimColor>({s.confidence})</Text></Text>)}</Text>}
+            {/* kept (blank) on rows that never rolled, so the list does not
+                jump when the cursor moves onto a rolled one */}
+            {rows.some(r => r.lastRound) && <Text wrap="truncate-end" dimColor> {row?.lastRound ?? ' '}</Text>}
             <Text dimColor> {top > 0 ? `▲ ${top} more` : '─'.repeat(10)}</Text>
             {slice.map((x, i) => {
                 const idx = top + i
@@ -599,7 +605,8 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
                         {isCur ? ' › ' : '   '}
                         <Text dimColor>{String(idx + 1).padStart(2)} </Text>
                         <Text color={answerColor(x.answer)} bold>{label.padEnd(7)}</Text>
-                        <Text color={sends ? 'yellow' : undefined} dimColor={needsAnswer}>{x.question.slice(0, QUESTION_WIDTH).padEnd(QUESTION_WIDTH + 1)}</Text>
+                        <Text color="magenta">{rollTag(x.rollCount)}</Text>
+                        <Text color={sends ? 'yellow' : undefined} dimColor={needsAnswer}>{x.question.slice(0, QUESTION_WIDTH - rollTag(x.rollCount).length).padEnd(QUESTION_WIDTH + 1 - rollTag(x.rollCount).length)}</Text>
                         {needsAnswer
                             ? <Text color="red"> ⚠ needs answer{x.answer ? ` (${priceProblem(x.answer, x.identifierDecoded, x.labels?.length)})` : ''}</Text>
                             : sends

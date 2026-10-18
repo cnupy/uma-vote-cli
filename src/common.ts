@@ -39,6 +39,10 @@ export type PendingRequest = {
     ancillaryData: `0x${string}`
 }
 
+// Put before the title of a request that rolled from an earlier round:
+// "[roll] " the first time, "[roll N] " after that, '' when it never rolled
+export const rollTag = (rollCount?: number) => !rollCount ? '' : rollCount === 1 ? '[roll] ' : `[roll ${rollCount}] `
+
 export const votingContract = { address: UMA_VOTING_V2, abi: umaContractAbi } as const
 
 // 0 = commit, 1 = reveal

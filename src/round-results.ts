@@ -111,6 +111,18 @@ export type RoundResults = {
     fetchedAt: number
 }
 
+// One line on how a round voted on a request: each revealed answer's share of
+// the revealed stake, then why it did not resolve. undefined = the round has
+// no reveals for it.
+export function rollSummary(d: RoundResults, ancillaryData: string, time: bigint): string | undefined {
+    if (d.status !== 'ok') return undefined
+    const t = d.requests.find(r => r.ancillaryData.toLowerCase() === ancillaryData.toLowerCase() && r.time === time)
+    if (!t) return undefined
+    const shares = t.prices.map(s => `${priceLabel(s.price, decodeIdentifier(t.identifier)).split('/')[0]} ${pct(s.tokens, t.total)}`).join(' · ')
+    const why = [!t.quorumOk && 'below quorum', !t.consensusOk && 'no consensus'].filter(Boolean).join(', ')
+    return why ? `${shares} · ${why}` : shares
+}
+
 // ---------- disk cache ----------
 // Past rounds are final, so their results persist in .cache/results/ across
 // runs (getLogs sweeps take seconds). Entries invalidate when the signing key

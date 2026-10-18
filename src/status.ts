@@ -3,7 +3,7 @@ import path from 'node:path'
 import { getAddress } from 'viem'
 import {
     getVotePhase, getCurrentRoundId, getPendingRequests, getAnswers, loadRound,
-    phaseEndsAt, fmtCountdown, handleHelp, detectStuckTx, titleFromAncillary, type Answer,
+    phaseEndsAt, fmtCountdown, handleHelp, detectStuckTx, titleFromAncillary, rollTag, type Answer,
 } from './common'
 import { voterIdentity } from './crypto'
 import { voteKey } from './answers'
@@ -17,16 +17,17 @@ import { getOnChainCommitments, renderAnswersDiff, GREEN, DIM, RESET } from './c
 
 // Number the table as the commit review does: one row per active request, in
 // getPendingRequests order. A request the answers file lacks gets a blank row,
-// so the numbers still match the review. An untimed answer matches on
+// so the numbers still match the review, and a rolled one is tagged [roll]
+// as in the review. An untimed answer matches on
 // ancillaryData alone; entries for no active request go last, in file order.
-function inChainOrder(list: Answer[], requests: { ancillaryData: `0x${string}`; time: bigint }[]): Answer[] {
+function inChainOrder(list: Answer[], requests: { ancillaryData: `0x${string}`; time: bigint; rollCount: number }[]): Answer[] {
     const byKey = new Map<string, Answer>()
     for (const a of list) if (!byKey.has(voteKey(a))) byKey.set(voteKey(a), a)
     const used = new Set<Answer>()
     const rows = requests.map(r => {
         const a = byKey.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time })) ?? byKey.get(voteKey({ ancillaryData: r.ancillaryData }))
-        if (a && !used.has(a)) { used.add(a); return a }
-        return { ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: titleFromAncillary(r.ancillaryData) ?? '(not in the answers file)', answer: '' }
+        if (a && !used.has(a)) { used.add(a); return { ...a, question: rollTag(r.rollCount) + a.question } }
+        return { ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: rollTag(r.rollCount) + (titleFromAncillary(r.ancillaryData) ?? '(not in the answers file)'), answer: '' }
     })
     return [...rows, ...list.filter(a => !used.has(a))]
 }

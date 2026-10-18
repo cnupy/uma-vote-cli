@@ -25,6 +25,7 @@ import {
     sendMulticallBatched, AbortSend, isPlaceholderTitle, sanitizeText, type StoredVote, type Answer,
 } from '../common'
 import { resolveAncillaryText } from '../resolve'
+import { fetchRoundResults, rollSummary } from '../round-results'
 import type { ReviewOpts, ReviewOutcome } from '../commit-ui'
 import { ensName } from '../ens'
 import { consoleSink, captureConsole, type OutputSink } from './sink'
@@ -199,6 +200,8 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         price?: bigint              // undefined = not committable as-is
         onchainPrice?: bigint
         problem?: string
+        rollCount: number           // rounds this request rolled through before this one
+        lastRound?: string          // rolled: how the last round voted on it (filled for the review)
     }
     const planned: PlannedRequest[] = []
     const saved = answersResult.saved
@@ -233,6 +236,7 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
             suggestions: (vote?.suggestions ?? []).map(x => ({ addon: sanitizeText(x.addon), answer: sanitizeText(x.answer), confidence: sanitizeText(x.confidence) })),
             conflicts: (vote?.conflicts ?? []).map(c => ({ addon: sanitizeText(c.addon), reason: sanitizeText(c.reason) })),
             disagree: vote?.disagree ?? false, sourceChanged: merged.sourceChanged, suggestionChanged: merged.suggestionChanged, basis: merged.basis, labels,
+            rollCount: r.rollCount,
         }
         row.problem = rowProblem({ ...row, answer, mergedAnswer: sanitizeText(merged.answer), known: !!vote || !!s })
         if (row.problem === undefined) {
@@ -279,6 +283,15 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
     let toSend: PlannedVote[]
 
     if (interactive) {
+        // A rolled request rolled from the round just before this one. That
+        // round is final, so after the first read its results come from the
+        // disk cache.
+        const rolled = planned.filter(p => p.rollCount > 0)
+        if (rolled.length > 0) {
+            out.log(`Reading round ${roundId - 1} results for ${rolled.length} rolled vote(s)…`)
+            const prev = await fetchRoundResults(roundId - 1).catch(() => undefined)
+            for (const p of rolled) p.lastRound = `rolled from ${roundId - 1}: ${(prev && rollSummary(prev, p.ancillaryData, p.time)) ?? 'no result found'}`
+        }
         // The review opens on the reconciled rows (planned above): the sources'
         // agreed answer, or your decided answer, with every source's
         // suggestion and confidence beside it, disagreements left blank, a
@@ -292,6 +305,7 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
                 answer: p.answer, decided: p.decided,
                 sourceAnswer: p.sourceAnswer || undefined, sources: p.suggestions, conflicts: p.conflicts.length > 0 ? p.conflicts : undefined, disagree: p.disagree || undefined,
                 sourceChanged: p.sourceChanged, suggestionChanged: p.suggestionChanged, onchainPrice: p.onchainPrice, labels: p.labels,
+                rollCount: p.rollCount, lastRound: p.lastRound,
             })),
         })
         // Persist the review — confirmed OR aborted — so the next run prefills
