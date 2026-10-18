@@ -3,9 +3,10 @@ import path from 'node:path'
 import { getAddress } from 'viem'
 import {
     getVotePhase, getCurrentRoundId, getPendingRequests, getAnswers, loadRound,
-    phaseEndsAt, fmtCountdown, handleHelp, detectStuckTx,
+    phaseEndsAt, fmtCountdown, handleHelp, detectStuckTx, titleFromAncillary, type Answer,
 } from './common'
 import { voterIdentity } from './crypto'
+import { voteKey } from './answers'
 import { ROOT } from './config'
 
 handleHelp(`Usage: nub run status
@@ -13,6 +14,22 @@ Current round, phase, your commitments (chain-first) and the suggested action.
 No options. --help, -h show this help.`)
 import { fetchRoundResults, renderRoundResults } from './round-results'
 import { getOnChainCommitments, renderAnswersDiff, GREEN, DIM, RESET } from './compare'
+
+// Number the table as the commit review does: one row per active request, in
+// getPendingRequests order. A request the answers file lacks gets a blank row,
+// so the numbers still match the review. An untimed answer matches on
+// ancillaryData alone; entries for no active request go last, in file order.
+function inChainOrder(list: Answer[], requests: { ancillaryData: `0x${string}`; time: bigint }[]): Answer[] {
+    const byKey = new Map<string, Answer>()
+    for (const a of list) if (!byKey.has(voteKey(a))) byKey.set(voteKey(a), a)
+    const used = new Set<Answer>()
+    const rows = requests.map(r => {
+        const a = byKey.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time })) ?? byKey.get(voteKey({ ancillaryData: r.ancillaryData }))
+        if (a && !used.has(a)) { used.add(a); return a }
+        return { ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: titleFromAncillary(r.ancillaryData) ?? '(not in the answers file)', answer: '' }
+    })
+    return [...rows, ...list.filter(a => !used.has(a))]
+}
 
 const [phase, roundId, pending] = await Promise.all([getVotePhase(), getCurrentRoundId(), getPendingRequests()])
 const active = pending.filter(r => r.lastVotingRound === roundId)
@@ -75,7 +92,7 @@ if (active.length > 0) {
 if (phase === 0 && answers) {
     if (onchainError) console.log(`\n⚠️  On-chain commitments unavailable — table below is uncompared.`)
     if (onchain) console.log(`\nCommitted ${onchain.commitments.length} vote(s) with ${onchain.address} — diff vs ${answers.source}:`)
-    const { mismatches, unclaimed } = renderAnswersDiff(answers.answers, onchain)
+    const { mismatches, unclaimed } = renderAnswersDiff(inChainOrder(answers.answers, active), onchain)
     if (onchain) {
         if (mismatches === 0 && unclaimed.length === 0) console.log(`\n${GREEN}✓ All your committed votes match the answers file.${RESET}`)
         else console.log(`\n⚠️  ${mismatches} difference(s)${unclaimed.length > 0 ? ` + ${unclaimed.length} commitment(s) without a counterpart` : ''} — review + fix with nub run commit.`)
