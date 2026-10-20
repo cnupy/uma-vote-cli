@@ -703,6 +703,21 @@ export async function ensureFreshFees(
     return { maxFeePerGas: fresh.maxFeePerGas, maxPriorityFeePerGas: fresh.maxPriorityFeePerGas }
 }
 
+// Splits sub-calls, in order, into multicalls whose encoded calldata stays
+// within `limit` bytes. A single sub-call over the limit goes alone.
+export function splitMulticall(datas: `0x${string}`[], limit: number): `0x${string}`[][] {
+    const encodedBytes = (batch: `0x${string}`[]) =>
+        (encodeFunctionData({ abi: votingContract.abi, functionName: 'multicall', args: [batch] }).length - 2) / 2
+    const chunks: `0x${string}`[][] = []
+    let cur: `0x${string}`[] = []
+    for (const d of datas) {
+        if (cur.length > 0 && encodedBytes([...cur, d]) > limit) { chunks.push(cur); cur = [] }
+        cur.push(d)
+    }
+    if (cur.length > 0) chunks.push(cur)
+    return chunks
+}
+
 // Headroom over the node's gas estimate for vote multicalls — see send() below.
 const GAS_BUFFER_PCT = Number(process.env.GAS_BUFFER_PCT ?? 125)
 
@@ -758,19 +773,18 @@ export async function sendMulticallBatched(
     } catch (e) {
         if (e instanceof AbortSend) throw e
         const msg = ((e as Error & { details?: string }).details ?? (e as Error).message ?? '')
-        if (datas.length < 2 || !/invalid request|too large|payload|exceeds/i.test(msg)) throw e
+        // The Lattice SDK writes the signing request's length in 16 bits and
+        // throws "out of range ... <= 65535" past it. Round 10373: 141 commits
+        // came to 119,908 bytes of calldata, where 31 commits had gone in one tx.
+        const sizeCap = msg.match(/out of range\. It must be >= 0 and <= (\d+)/)
+        if (datas.length < 2 || !(sizeCap || /invalid request|too large|payload|exceeds/i.test(msg))) throw e
 
-        const limit = Number(process.env.TX_DATA_LIMIT_BYTES ?? 1400)
-        const chunks: `0x${string}`[][] = []
-        let cur: `0x${string}`[] = [], curBytes = 0
-        for (const d of datas) {
-            const bytes = (d.length - 2) / 2
-            if (cur.length > 0 && curBytes + bytes > limit) { chunks.push(cur); cur = []; curBytes = 0 }
-            cur.push(d); curBytes += bytes
-        }
-        if (cur.length > 0) chunks.push(cur)
+        // Under a stated cap, leave 2 KB for the rest of the request (the
+        // error counted 49 bytes more than the calldata)
+        const limit = Number(process.env.TX_DATA_LIMIT_BYTES ?? (sizeCap ? Number(sizeCap[1]) - 2048 : 1400))
+        const chunks = splitMulticall(datas, limit)
 
-        say(`\n⚠️  Wallet rejected the large transaction (${msg.split('\n')[0]}) — likely the GridPlus Lattice ~1.5KB calldata limit.`)
+        say(`\n⚠️  Wallet rejected the large transaction (${msg.split('\n')[0]}) — ${sizeCap ? `the GridPlus Lattice request limit is ${sizeCap[1]} bytes` : 'likely the GridPlus Lattice ~1.5KB calldata limit'}.`)
         say(`Splitting into ${chunks.length} smaller transaction(s); confirm EACH on the device.`)
         const hashes: `0x${string}`[] = []
         for (const [i, chunk] of chunks.entries()) {
