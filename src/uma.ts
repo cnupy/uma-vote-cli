@@ -53,6 +53,9 @@ function resolveVoter(): `0x${string}` {
 }
 
 const voter = resolveVoter()
+// Addon background work (e.g. a thread capture) runs while the app is open
+const { startAddonBackground } = await import('./addons')
+await startAddonBackground()
 const { runUmaDashboard } = await import('./uma-ui')
 await runUmaDashboard(voter)
 // USB/WalletConnect signer sessions hold the event loop open — exit explicitly

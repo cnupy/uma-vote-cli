@@ -60,29 +60,48 @@ export type AnswerSourcePlugin = {
     verifyBeforeCommit?(roundId: number, answers: Answer[]): Promise<{ ok: boolean; detail: string }>
     /** Print provenance / trust warnings before the vote table. */
     report?(roundId: number): Promise<void>
+    /** Work to keep running while an interactive session is open (the `uma`
+     *  app, the commit review), started once per process by
+     *  startAddonBackground. Must print nothing: the session is a full-screen
+     *  render. Timers must be unref'd so they never keep the process alive. */
+    background?(): void
     /** Extra commands, dispatched by `nub run addon <command>` — or
      *  `nub run addon <addon> <command>` when two addons share a command name
      *  (the unqualified form refuses ambiguity). process.argv is preserved. */
     commands?: Record<string, { description: string; run(argv: string[]): Promise<void> }>
 }
 
-let cache: AnswerSourcePlugin[] | undefined
+// The promise is cached, not the array: startAddonBackground and the commit
+// flow load addons at nearly the same moment, and a second caller must not get
+// the array while the first is still filling it.
+let cache: Promise<AnswerSourcePlugin[]> | undefined
 
-export async function loadAddons(): Promise<AnswerSourcePlugin[]> {
-    if (cache) return cache
-    cache = []
-    const dir = path.join(ROOT, 'addons')
-    if (!existsSync(dir)) return cache
-    for (const name of readdirSync(dir)) {
-        const entry = path.join(dir, name, 'index.ts')
-        if (!existsSync(entry)) continue
-        try {
-            const mod = await import(pathToFileURL(entry).href)
-            if (mod.default?.name) cache.push(mod.default as AnswerSourcePlugin)
-            else console.error(`⚠ addon "${name}" has no default AnswerSourcePlugin export — skipped`)
-        } catch (e) {
-            console.error(`⚠ addon "${name}" failed to load: ${(e as Error).message.split('\n')[0]}`)
+export function loadAddons(): Promise<AnswerSourcePlugin[]> {
+    cache ??= (async () => {
+        const loaded: AnswerSourcePlugin[] = []
+        const dir = path.join(ROOT, 'addons')
+        if (!existsSync(dir)) return loaded
+        for (const name of readdirSync(dir)) {
+            const entry = path.join(dir, name, 'index.ts')
+            if (!existsSync(entry)) continue
+            try {
+                const mod = await import(pathToFileURL(entry).href)
+                if (mod.default?.name) loaded.push(mod.default as AnswerSourcePlugin)
+                else console.error(`⚠ addon "${name}" has no default AnswerSourcePlugin export — skipped`)
+            } catch (e) {
+                console.error(`⚠ addon "${name}" failed to load: ${(e as Error).message.split('\n')[0]}`)
+            }
         }
-    }
+        return loaded
+    })()
     return cache
+}
+
+// Starts every addon's background() once per process. Called before the
+// interactive session renders, so loading messages still reach the console.
+let started = false
+export async function startAddonBackground(): Promise<void> {
+    if (started) return
+    started = true
+    for (const addon of await loadAddons()) addon.background?.()
 }

@@ -2,6 +2,7 @@
 // runs the extracted pipeline (src/flows/commit-flow.ts) with console output.
 import { hasFlag, handleHelp, startPerfDrain } from './common'
 import { runCommitFlow } from './flows/commit-flow'
+import { startAddonBackground } from './addons'
 
 handleHelp(`Usage: nub run commit [options]
 Commit votes for the current round (interactive review on a terminal).
@@ -23,6 +24,9 @@ const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY && !hasFlag(
 // The interactive review is a long-lived Ink render — drain React's leaked
 // performance.measure entries so a lengthy sit never trips Node's buffer warning
 if (interactive) void startPerfDrain()
+// Addon background work (e.g. a thread capture) runs only while a human is
+// in the review, never on a batch run
+if (interactive) await startAddonBackground()
 
 // USB/WalletConnect signer sessions hold the event loop open — exit explicitly
 process.exit(await runCommitFlow({ dryRun, force, yes: hasFlag('--yes'), interactive }))
