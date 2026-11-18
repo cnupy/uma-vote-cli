@@ -24,7 +24,7 @@
 import path from 'node:path'
 import React, { useEffect, useRef, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { logErrorToFile, sanitizeText } from './common'
+import { getPendingRequests, logErrorToFile, sanitizeText } from './common'
 import { setPromptBridge, getPromptBridge } from './signers/prompt'
 import { runCommitFlow } from './flows/commit-flow'
 import { CommitReview, type ReviewOpts, type ReviewOutcome } from './commit-ui'
@@ -68,6 +68,7 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout, onWal
     // instead of exiting. refetchNextRef flags that one restart as a re-pull.
     const reloadRef = useRef(false)
     const refetchNextRef = useRef(false)
+    const reorderedRef = useRef(false)   // the review was restarted to take the chain's new order
 
     const running = exitCode === undefined && error === undefined
 
@@ -131,6 +132,37 @@ export function CommitScreen({ onExit, active = true, onRoundNav, onAbout, onWal
             }
         })
     }, [runId])
+
+    // The chain's vote order changes once per round, seconds after the round
+    // starts: the first vote transactions clear last round's requests, and
+    // VotingV2 moves the last request into each freed slot. A flow started at
+    // the rollover read the old order and its review keeps it all day, while
+    // the web app shows the chain's order as it is now. So when the review is
+    // shown, and once more a minute later, compare its order with the chain's;
+    // if they differ, restart the flow the way the review's r key does. The
+    // answers survive: the review saves on every change, and the wind-down
+    // saves again before the restart prefills from that file.
+    useEffect(() => {
+        // once per screen (one round): two RPC nodes that disagree must not
+        // restart the flow over and over
+        if (!active || !review || reorderedRef.current) return
+        let live = true
+        const key = (r: { ancillaryData: string; time: bigint }) => `${r.ancillaryData}:${r.time}`
+        const shown = review.opts.rows.map(key).join()
+        const check = () => getPendingRequests().then(pending => {
+            if (!live || reviewRef.current !== review) return
+            const chain = pending.filter(r => r.lastVotingRound === review.opts.roundId).map(key).join()
+            if (chain === shown) return
+            reorderedRef.current = true
+            reloadRef.current = true
+            abortedRef.current = true   // no wind-down frame, as for r
+            setReview(undefined)
+            review.resolve({ rows: review.opts.rows, confirmed: false })
+        }).catch(() => { /* the next check or the r key reads it again */ })
+        check()
+        const t = setTimeout(check, 60_000)
+        return () => { live = false; clearTimeout(t) }
+    }, [active, review])
 
     const spinning = running && !review && !prompt
     useEffect(() => {
