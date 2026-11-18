@@ -20,7 +20,7 @@
 // applied. A row that only ever held a suggestion stays a suggestion: the
 // review prefills it, a batch run does not sign it. ANSWERS_FILE is the one
 // exception: when set it is the only source and the saved review is not read.
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import path from 'node:path'
 import { ROOT } from './config'
 import { loadAddons, type AnswerSourcePlugin } from './addons'
@@ -233,6 +233,39 @@ export function loadSavedReview(roundId: number): Map<string, SavedRow> | undefi
             question: typeof a.question === 'string' && a.question.trim() !== '' ? sanitizeText(a.question) : undefined,
         }]))
     } catch { return undefined }
+}
+
+// One row of the saved review: the answer, the source value it was judged
+// against (`source`, the basis) and whether it is the owner's (`decided`).
+export type LocalAnswer = Answer & { source?: string; decided?: boolean }
+
+// The saved-review rows for a set of reviewed rows, by the rules of
+// nextBasis/nextDecided. `prefilled` is what each row opened with, keyed by
+// voteKey; a row missing from it is the owner's when answered.
+export function localAnswers(
+    rows: Array<{ ancillaryData: string; time: bigint | number; question: string; answer: string }>,
+    prefilled: Map<string, { answer: string; sourceAnswer: string; basis: string; decided: boolean }>,
+    confirmed: boolean,
+): LocalAnswer[] {
+    return rows.map(r => {
+        const p = prefilled.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time }))
+        const basis = p ? nextBasis({ answer: r.answer, prefilled: p.answer, sourceAnswer: p.sourceAnswer, basis: p.basis }) : ''
+        const decided = p ? nextDecided({ answer: r.answer, prefilled: p.answer, decided: p.decided }, confirmed) : r.answer !== ''
+        return { ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer, source: basis, decided }
+    })
+}
+
+// Writes the saved review loadSavedReview reads. Written to a temporary file
+// and renamed, so a crash mid-write never leaves half a file behind. An empty
+// list writes nothing.
+export function saveLocalReview(roundId: number, answered: LocalAnswer[]): void {
+    if (answered.length === 0) return
+    const file = path.join(ROOT, 'answers', `${roundId}.local.json`)
+    mkdirSync(path.dirname(file), { recursive: true })
+    // one temporary name per process, so two sessions on one round never rename each other's file
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify(answered, null, 2))
+    renameSync(tmp, file)
 }
 
 export type CollectOpts = {

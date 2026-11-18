@@ -9,24 +9,23 @@
 // exiting, so an embedding app survives. Only the uncaught-error handler still
 // prints directly.
 import path from 'node:path'
-import { writeFileSync, mkdirSync } from 'node:fs'
 import { encodeFunctionData, getAddress } from 'viem'
 import { umaContractAbi } from '../umaAbi'
-import { EXPECTED_VOTER, ROOT } from '../config'
+import { EXPECTED_VOTER } from '../config'
 import { getSigningKey, deterministicSalt, encryptVote, type SigningKey } from '../crypto'
 import { ask } from '../signers/prompt'
 import { loadAddons } from '../addons'
-import { collectAnswers, answersForGate, lookupVote, roundOverview, rowTitle, reconcile, nextBasis, nextDecided, batchAnswer, blockedInBatch, committedContested, keepsCommitment, rowProblem, voteKey, type Suggestion, type Conflict } from '../answers'
+import { collectAnswers, answersForGate, lookupVote, roundOverview, rowTitle, reconcile, localAnswers, saveLocalReview, batchAnswer, blockedInBatch, committedContested, keepsCommitment, rowProblem, voteKey, type Suggestion, type Conflict } from '../answers'
 import { getOnChainCommitments, takeCommitment, priceLabel, GREEN, RED, DIM, RESET } from '../compare'
 import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
     getPendingRequests, getVoterFromDelegate, decodeIdentifier, encodePrice, describePrice, priceProblem, multipleValuesLabels,
     randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, computeFees, describeFees, feeWarning,
-    sendMulticallBatched, AbortSend, isPlaceholderTitle, sanitizeText, type StoredVote, type Answer,
+    sendMulticallBatched, AbortSend, isPlaceholderTitle, sanitizeText, type StoredVote,
 } from '../common'
 import { resolveAncillaryText } from '../resolve'
 import { fetchRoundResults, rollSummary } from '../round-results'
-import type { ReviewOpts, ReviewOutcome } from '../commit-ui'
+import type { ReviewOpts, ReviewOutcome, ReviewRow } from '../commit-ui'
 import { ensName } from '../ens'
 import { consoleSink, captureConsole, type OutputSink } from './sink'
 
@@ -296,56 +295,64 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         // agreed answer, or your decided answer, with every source's
         // suggestion and confidence beside it, disagreements left blank, a
         // moved source and a changed suggestion flagged.
+        // The review is saved to a separate .local.json (a pulled answers file
+        // is never overwritten) after every answer change, then once more when
+        // it ends, confirmed or aborted, so the next run prefills instead of
+        // starting blank and a crash keeps the picks made so far. Confirming
+        // means pressing y on the "Commit N vote(s)?" modal, in `nub run
+        // commit` and in the uma app's commit screen alike; that last save
+        // comes before the wallet is touched.
+        //
+        // Every row is saved (blanks included) WITH the source value it was
+        // judged against (`source` = the basis) and whether it is yours
+        // (`decided`): a row you changed, or any answered row when you
+        // confirmed. A row you left as suggested and did not confirm is saved
+        // as a suggestion: the next review prefills it, a batch run does not
+        // sign it. A row you changed in this review takes the sources' current
+        // agreed value as its basis; a row you left alone keeps the basis
+        // `reconcile` settled on, so a flagged move stays flagged until you
+        // re-enter it. Sources that returned nothing never blank the basis: the
+        // row keeps what was saved. A deliberate CLEAR (blank answer) is yours
+        // too, and survives. Saves during the review use the unconfirmed rules.
+        // The rules are localAnswers and saveLocalReview in answers.ts.
+        const prefilled = new Map(planned.map(p => [voteKey({ ancillaryData: p.ancillaryData, timestamp: p.time }), p]))
+        const openRows: ReviewRow[] = planned.map(p => ({
+            question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
+            time: p.time, ancillaryData: p.ancillaryData,
+            answer: p.answer, decided: p.decided,
+            sourceAnswer: p.sourceAnswer || undefined, sources: p.suggestions, conflicts: p.conflicts.length > 0 ? p.conflicts : undefined, disagree: p.disagree || undefined,
+            sourceChanged: p.sourceChanged, suggestionChanged: p.suggestionChanged, onchainPrice: p.onchainPrice, labels: p.labels,
+            rollCount: p.rollCount, lastRound: p.lastRound,
+        }))
+        let liveRows: ReviewRow[] | undefined
         const reviewed = await review({
             roundId, phaseEnd: phaseEndsAt(), diffAvailable: !!onchain, force,
             notices: addonNotices,
-            rows: planned.map(p => ({
-                question: p.question, needsTitle: p.needsTitle, identifier: p.identifier, identifierDecoded: p.identifierDecoded,
-                time: p.time, ancillaryData: p.ancillaryData,
-                answer: p.answer, decided: p.decided,
-                sourceAnswer: p.sourceAnswer || undefined, sources: p.suggestions, conflicts: p.conflicts.length > 0 ? p.conflicts : undefined, disagree: p.disagree || undefined,
-                sourceChanged: p.sourceChanged, suggestionChanged: p.suggestionChanged, onchainPrice: p.onchainPrice, labels: p.labels,
-                rollCount: p.rollCount, lastRound: p.lastRound,
-            })),
+            onRowsChange: rows => {
+                liveRows = rows
+                // Runs inside the review's key handler, where an error would
+                // end the process. A failed save here is not fatal: the next
+                // change, and the final save below, write the file again.
+                try { saveLocalReview(roundId, localAnswers(rows, prefilled, false)) } catch { /* see above */ }
+            },
+            rows: openRows,
         })
-        // Persist the review — confirmed OR aborted — so the next run prefills
-        // instead of starting blank. Saved BEFORE sending (a rejected tx or a
-        // quit must not lose the selections) and to a separate .local.json — a
-        // pulled answers file is never overwritten. Confirming means pressing
-        // y on the "Commit N vote(s)?" modal, in `nub run commit` and in the
-        // uma app's commit screen alike; the file is written at that moment,
-        // before the wallet is touched.
+        // Ctrl+C, and a rollover in the uma app, end the review without its
+        // rows: they come back as the rows it opened with. Keep the edited ones.
+        const reviewedRows = reviewed.rows === openRows && liveRows ? liveRows : reviewed.rows
+        // The final save, confirmed or aborted, BEFORE sending: a rejected tx
+        // or a quit must not lose the selections
+        const answered = localAnswers(reviewedRows, prefilled, reviewed.confirmed)
+        saveLocalReview(roundId, answered)
         toSend = []
         let unanswered = 0
-        type LocalAnswer = Answer & { source?: string; decided?: boolean }
-        const answered: LocalAnswer[] = []
-        const prefilled = new Map(planned.map(p => [voteKey({ ancillaryData: p.ancillaryData, timestamp: p.time }), p]))
-        for (const r of reviewed.rows) {
-            // Persist every row (blanks included) WITH the source value it was
-            // judged against (`source` = the basis) and whether it is yours
-            // (`decided`): a row you changed, or any answered row when you
-            // confirmed. A row you left as suggested and did not confirm is
-            // saved as a suggestion: the next review prefills it, a batch run
-            // does not sign it. A row you changed in this review takes the
-            // sources' current agreed value as its basis; a row you left alone
-            // keeps the basis `reconcile` settled on, so a flagged move stays
-            // flagged until you re-enter it. Sources that returned nothing
-            // never blank the basis: the row keeps what was saved. A deliberate
-            // CLEAR (blank answer) is yours too, and survives.
-            const p = prefilled.get(voteKey({ ancillaryData: r.ancillaryData, timestamp: r.time }))
-            const basis = p ? nextBasis({ answer: r.answer, prefilled: p.answer, sourceAnswer: p.sourceAnswer, basis: p.basis }) : ''
-            const decided = p ? nextDecided({ answer: r.answer, prefilled: p.answer, decided: p.decided }, reviewed.confirmed) : r.answer !== ''
-            answered.push({ ancillaryData: r.ancillaryData, timestamp: Number(r.time), question: r.question, answer: r.answer, source: basis, decided })
+        for (const r of reviewedRows) {
             const price = r.answer ? encodePrice(r.answer, r.identifierDecoded, r.labels?.length) : undefined
             if (price === undefined) { unanswered++; continue }
             // Committing a subset is safe: VotingV2.commitVote overwrites the hash
             // per request, other requests' commitments are untouched.
             if (onchain && !force && r.onchainPrice === price) continue
             toSend.push(toPlannedVote(r, price))
-        }
-        if (answered.length > 0) {
-            mkdirSync(path.join(ROOT, 'answers'), { recursive: true })
-            writeFileSync(path.join(ROOT, 'answers', `${roundId}.local.json`), JSON.stringify(answered, null, 2))
         }
         if (!reviewed.confirmed) {
             const yours = answered.filter(a => a.decided).length

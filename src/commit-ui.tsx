@@ -42,6 +42,9 @@ export type ReviewOpts = {
     // Answers-source output (pull progress, provenance, trust warnings) — the
     // review keeps the warning lines on screen and shows the rest behind `p`
     notices?: string[]
+    // Called after every answer change, so the flow can save the review as it
+    // goes (a crash or a closed window keeps the picks made so far)
+    onRowsChange?: (rows: ReviewRow[]) => void
 }
 
 // The rows come back on abort too, so the flow can persist edited answers
@@ -255,6 +258,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
             else if (input === '2') row.answer = 'yes'
             else return false
             force(x => x + 1)
+            opts.onRowsChange?.(rows)
             return true
         }
         if (input === 'v') {
@@ -296,6 +300,7 @@ export function CommitReview({ opts, onDone, onRoundNav, onAbout, onReload, onWa
                 if (customBuf === '' || customProblem(row, customBuf) === undefined) {
                     row.answer = customBuf
                     setView(customFrom); force(x => x + 1)
+                    opts.onRowsChange?.(rows)
                 }
             }
             else if (key.escape) setView(customFrom)

@@ -23,7 +23,7 @@ import { ROOT } from './config'
 import { encodePrice, decodeMultipleValues, describePrice, multipleValuesLabels, priceProblem, typedPriceProblem, P1_VALUE, P2_VALUE, P4_VALUE, UNRESOLVABLE_VALUE, type Answer } from './common'
 import { priceLabel } from './compare'
 import type { AnswerSourcePlugin } from './addons'
-import { collectAnswers, mergeSources, lookupVote, roundOverview, rowTitle, reconcile, nextBasis, nextDecided, batchAnswer, blockedInBatch, committedContested, keepsCommitment, rowProblem, reviewStatus, sanitizeAnswers, answersForGate, loadSavedReview, voteKey, NOT_RATED, MALFORMED_CONFLICT } from './answers'
+import { collectAnswers, mergeSources, lookupVote, roundOverview, rowTitle, reconcile, nextBasis, nextDecided, localAnswers, saveLocalReview, batchAnswer, blockedInBatch, committedContested, keepsCommitment, rowProblem, reviewStatus, sanitizeAnswers, answersForGate, loadSavedReview, voteKey, NOT_RATED, MALFORMED_CONFLICT } from './answers'
 import { pinnedWarnings } from './tui'
 
 const quiet = { log() {}, warn() {}, error() {} }
@@ -200,6 +200,36 @@ test('the saved review file carries the decided flag and legacy files still read
         assert.deepEqual(saved.get(voteKey({ ancillaryData: '0xcc', timestamp: 3 })), { answer: 'P3', basis: 'P3', decided: undefined, question: 'legacy' })
         // a suggestion row whose source now says the same, confirmed earlier under the old format, is his
         assert.equal(reconcile(vote('P2'), saved.get(voteKey({ ancillaryData: AD, timestamp: 1 }))).decided, true)
+    } finally { dropSaved() }
+})
+
+test('the review saves on every change by the quit rules, and confirming saves again as yours', () => {
+    // opened with: a suggestion P4 (not his), and a blank
+    const prefilled = new Map([
+        [voteKey({ ancillaryData: AD, timestamp: 1 }), { answer: 'P4', sourceAnswer: 'P4', basis: 'P4', decided: false }],
+        [voteKey({ ancillaryData: AD2, timestamp: 2 }), { answer: '', sourceAnswer: '', basis: '', decided: false }],
+    ])
+    const rows = [
+        { ancillaryData: AD, time: 1n, question: 'suggested', answer: 'P4' },
+        { ancillaryData: AD2, time: 2n, question: 'blank', answer: '' },
+    ]
+    dropSaved()
+    try {
+        // mid-review: he answers the blank one; the change is on disk at once
+        rows[1].answer = 'P2'
+        saveLocalReview(ROUND, localAnswers(rows, prefilled, false))
+        let saved = loadSavedReview(ROUND)!
+        assert.deepEqual(saved.get(voteKey({ ancillaryData: AD2, timestamp: 2 })), { answer: 'P2', basis: '', decided: true, question: 'blank' })
+        assert.equal(saved.get(voteKey({ ancillaryData: AD, timestamp: 1 }))!.decided, false, 'an untouched suggestion stays a suggestion until he confirms')
+        assert.equal(existsSync(`${savedFile}.${process.pid}.tmp`), false, 'the temporary file is renamed away')
+        // y on the modal: every answered row is his
+        saveLocalReview(ROUND, localAnswers(rows, prefilled, true))
+        saved = loadSavedReview(ROUND)!
+        assert.equal(saved.get(voteKey({ ancillaryData: AD, timestamp: 1 }))!.decided, true)
+        // an empty review writes nothing
+        dropSaved()
+        saveLocalReview(ROUND, [])
+        assert.equal(existsSync(savedFile), false)
     } finally { dropSaved() }
 })
 
