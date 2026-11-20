@@ -77,7 +77,7 @@ export { GREEN, RED, DIM, CYAN, BOLD, RESET } from './common'
 export function renderAnswersDiff(
     answers: Answer[],
     onchain?: { address: `0x${string}`; commitments: OnChainCommitment[] },
-): { mismatches: number; unclaimed: OnChainCommitment[] } {
+): { mismatches: number; missing: number; unclaimed: OnChainCommitment[] } {
     const unclaimed = onchain ? [...onchain.commitments] : []
     let mismatches = 0
     console.log(`\n  #  Answer  Question`)
@@ -86,7 +86,7 @@ export function renderAnswersDiff(
         let color = '', note = ''
         if (onchain) {
             const c = takeCommitment(unclaimed, a.ancillaryData, a.timestamp !== undefined ? BigInt(a.timestamp) : undefined)
-            if (!c) { color = DIM; note = '  (you have not committed this one)'; mismatches++ }
+            if (!c) { color = a.answer ? RED : DIM; note = '  (you have not committed this one)'; mismatches++; if (a.answer) missing++ }
             else {
                 const identifierDecoded = decodeIdentifier(c.identifier)
                 const expected = encodePrice(a.answer, identifierDecoded)
@@ -96,5 +96,5 @@ export function renderAnswersDiff(
         }
         console.log(`${color}  ${String(i + 1).padStart(2)}  ${(a.answer ?? '?').padEnd(6)}  ${(a.question ?? '(no title)').slice(0, 90)}${note}${RESET}`)
     }
-    return { mismatches, unclaimed }
+    return { mismatches, missing, unclaimed }
 }

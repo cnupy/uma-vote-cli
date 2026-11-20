@@ -13,7 +13,7 @@ handleHelp(`Usage: nub run status
 Current round, phase, your commitments (chain-first) and the suggested action.
 No options. --help, -h show this help.`)
 import { fetchRoundResults, renderRoundResults } from './round-results'
-import { getOnChainCommitments, renderAnswersDiff, GREEN, DIM, RESET } from './compare'
+import { getOnChainCommitments, renderAnswersDiff, GREEN, RED, DIM, RESET } from './compare'
 
 // Number the table as the commit review does: one row per active request, in
 // getPendingRequests order. A request the answers file lacks gets a blank row,
@@ -93,8 +93,11 @@ if (active.length > 0) {
 if (phase === 0 && answers) {
     if (onchainError) console.log(`\n⚠️  On-chain commitments unavailable — table below is uncompared.`)
     if (onchain) console.log(`\nCommitted ${onchain.commitments.length} vote(s) with ${onchain.address} — diff vs ${answers.source}:`)
-    const { mismatches, unclaimed } = renderAnswersDiff(inChainOrder(answers.answers, active), onchain)
+    const { mismatches, missing, unclaimed } = renderAnswersDiff(inChainOrder(answers.answers, active), onchain)
     if (onchain) {
+        // A split commit can stop part way (round 10388: 5 of 78 never sent),
+        // so answered votes with no commitment get their own red line
+        if (missing > 0) console.log(`\n${RED}❌ ${missing} answered vote(s) are NOT committed on the chain — run nub run commit before the phase ends.${RESET}`)
         if (mismatches === 0 && unclaimed.length === 0) console.log(`\n${GREEN}✓ All your committed votes match the answers file.${RESET}`)
         else console.log(`\n⚠️  ${mismatches} difference(s)${unclaimed.length > 0 ? ` + ${unclaimed.length} commitment(s) without a counterpart` : ''} — review + fix with nub run commit.`)
     }

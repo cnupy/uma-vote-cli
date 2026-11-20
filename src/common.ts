@@ -559,6 +559,13 @@ export async function resolveFees(): Promise<{ maxFeePerGas: bigint; maxPriority
 // AbortSend (the app must survive) instead of the console path's process.exit.
 export type SendSink = { log(line: string): void }
 export class AbortSend extends Error { constructor() { super('Aborted — nothing sent.') } }
+// A split send that stopped part way: `hashes` are the batches on the chain,
+// `unsent` the sub-calls that never went out
+export class PartialSend extends Error {
+    constructor(readonly label: string, readonly hashes: `0x${string}`[], readonly sent: number, readonly unsent: number, why: string) {
+        super(`${unsent} ${label}(s) were NOT sent (${why}); ${sent} are on the chain.`)
+    }
+}
 
 // Public RPCs can't list an account's pending txs — but every tx here is
 // broadcast by this tool, so the last sent hash is recorded and stuck-tx
@@ -788,8 +795,25 @@ export async function sendMulticallBatched(
         say(`Splitting into ${chunks.length} smaller transaction(s); confirm EACH on the device.`)
         const hashes: `0x${string}`[] = []
         for (const [i, chunk] of chunks.entries()) {
-            say(`\n[${i + 1}/${chunks.length}] Sending ${chunk.length} ${label}(s)...`)
-            hashes.push(await send(chunk))
+            say(`\n[${i + 1}/${chunks.length}] Sending ${chunk.length} ${label}(s) — confirm transaction ${i + 1} of ${chunks.length} on the device...`)
+            // A batch that fails after earlier ones went through leaves part of
+            // the votes off the chain. Round 10388: the second confirm on the
+            // Lattice was missed, the request timed out after about a minute,
+            // and 5 of 78 commits were never sent while the app showed only an
+            // error. So say how many are on the chain and offer the same batch
+            // again; the calldata is deterministic, so a retry is the same tx.
+            for (;;) {
+                try { hashes.push(await send(chunk)); break }
+                catch (err) {
+                    if (err instanceof AbortSend) throw err
+                    const sent = chunks.slice(0, i).reduce((n, c) => n + c.length, 0)
+                    const why = (((err as Error & { details?: string }).details ?? (err as Error).message ?? '') as string).split('\n')[0]
+                    say(`\n❌ Transaction ${i + 1} of ${chunks.length} was NOT sent (${why}).`)
+                    say(`   ${sent} of ${datas.length} ${label}(s) are on the chain; ${datas.length - sent} are NOT.`)
+                    const reply = await ask(`Send transaction ${i + 1} of ${chunks.length} again (confirm it on the device)? (Y/n)`)
+                    if (/^n/i.test(reply.trim())) throw new PartialSend(label, hashes, sent, datas.length - sent, why)
+                }
+            }
         }
         return hashes
     }

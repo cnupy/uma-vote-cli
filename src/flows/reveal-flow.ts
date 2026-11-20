@@ -18,7 +18,7 @@ import { umaContractAbi } from '../umaAbi'
 import { ROUNDS_DIR } from '../config'
 import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
-    getVoterFromDelegate, getEncryptedVoteEvents, decodeIdentifier, computeFees, describeFees, feeWarning, sendMulticallBatched, AbortSend,
+    getVoterFromDelegate, getEncryptedVoteEvents, decodeIdentifier, computeFees, describeFees, feeWarning, sendMulticallBatched, AbortSend, PartialSend,
     loadRound, saveRound, phaseEndsAt, fmtCountdown, type RoundFile,
 } from '../common'
 import { getSigningKey, decryptVote } from '../crypto'
@@ -198,6 +198,12 @@ export async function runRevealFlow(opts: RevealFlowOpts): Promise<number> {
         txHashes = await sendMulticallBatched(datas, account, fees, 'reveal', out)
     } catch (e) {
         if (e instanceof AbortSend) { out.log(e.message); return 0 }
+        // Reveal reads the chain first, so a new run reveals only what is
+        // still hidden; the round file is left as it was
+        if (e instanceof PartialSend) {
+            out.error(`\n❌ ${e.unsent} vote(s) are NOT revealed. ${e.sent} are revealed. Run the reveal again before the phase ends.`)
+            return 1
+        }
         throw e
     }
     const txHash = txHashes[txHashes.length - 1]

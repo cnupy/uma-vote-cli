@@ -21,7 +21,7 @@ import {
     publicClient, votingContract, getWalletAccount, getVotePhase, getCurrentRoundId,
     getPendingRequests, getVoterFromDelegate, decodeIdentifier, encodePrice, describePrice, priceProblem, multipleValuesLabels,
     randomSalt, commitHash, loadRound, saveRound, phaseEndsAt, fmtCountdown, derivedPhase, computeFees, describeFees, feeWarning,
-    sendMulticallBatched, AbortSend, isPlaceholderTitle, sanitizeText, type StoredVote,
+    sendMulticallBatched, AbortSend, PartialSend, isPlaceholderTitle, sanitizeText, type StoredVote,
 } from '../common'
 import { resolveAncillaryText } from '../resolve'
 import { fetchRoundResults, rollSummary } from '../round-results'
@@ -547,6 +547,19 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<number> {
         txHashes = await sendMulticallBatched(datas, account, fees, 'commit', out)
     } catch (e) {
         if (e instanceof AbortSend) { out.log(e.message); return 0 }
+        if (e instanceof PartialSend) {
+            // Record the batches that did go out, so the round file agrees
+            // with the chain, and say plainly that the rest is missing. A new
+            // run diffs against the chain and sends only the missing votes.
+            if (e.hashes.length > 0) {
+                const round = loadRound(roundId)!
+                round.commitTxHash = e.hashes[e.hashes.length - 1]
+                saveRound(round)
+            }
+            out.error(`\n❌ ${e.unsent} of ${toSend.length} vote(s) are NOT committed. ${e.sent} are on the chain.`)
+            out.error(`Commit again before ${phaseEndsAt().toISOString()}: the review shows the missing votes as not committed and sends only those.`)
+            return 1
+        }
         throw e
     }
 
