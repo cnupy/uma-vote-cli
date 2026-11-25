@@ -80,6 +80,7 @@ export function renderAnswersDiff(
 ): { mismatches: number; missing: number; unclaimed: OnChainCommitment[] } {
     const unclaimed = onchain ? [...onchain.commitments] : []
     let mismatches = 0
+    let missing = 0   // answered here, no commitment on the chain
     console.log(`\n  #  Answer  Question`)
     console.log(`  ${'-'.repeat(92)}`)
     for (const [i, a] of answers.entries()) {
